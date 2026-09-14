@@ -36,6 +36,7 @@ pub fn run_daemon(
     data_dir: PathBuf,
     bootstrap_config: Option<PathBuf>,
     web_listen: Option<String>,
+    admin_password_file: Option<PathBuf>,
 ) -> Result<(), String> {
     ensure_execution_identity()?;
     fs::create_dir_all(&data_dir)
@@ -79,16 +80,36 @@ pub fn run_daemon(
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown_requested))
         .map_err(|error| format!("注册 SIGINT 处理失败：{error}"))?;
 
+    // 密码文件要在 Web 管理开始监听之前生效，避免留出一个"谁先访问谁设密码"的窗口。
+    // 文件不可用时 DNS 与本机 IPC 继续运行，但 Web 管理保持关闭，修正文件后重启即可恢复。
     #[cfg(feature = "web-admin")]
-    let web_admin = web_listen
-        .as_deref()
-        .map(|listen| {
-            crate::web_admin::start(Arc::clone(&state), listen, Arc::clone(&shutdown_requested))
-        })
-        .transpose()?;
+    let web_admin_credentials_ready = match admin_password_file.as_deref() {
+        None => true,
+        Some(path) => crate::web_auth::apply_password_file(&state, path)
+            .map(|_| true)
+            .unwrap_or_else(|error| {
+                eprintln!("[错误] {error}");
+                eprintln!("[错误] 为避免退回到可被抢占的首次设置状态，Web 管理后台未启动");
+                false
+            }),
+    };
+    #[cfg(feature = "web-admin")]
+    let web_admin = if web_admin_credentials_ready {
+        web_listen
+            .as_deref()
+            .map(|listen| {
+                crate::web_admin::start(Arc::clone(&state), listen, Arc::clone(&shutdown_requested))
+            })
+            .transpose()?
+    } else {
+        None
+    };
     #[cfg(not(feature = "web-admin"))]
     {
         if web_listen.is_some() {
+            return Err("当前构建未启用 Web 管理后台".to_string());
+        }
+        if admin_password_file.is_some() {
             return Err("当前构建未启用 Web 管理后台".to_string());
         }
     }

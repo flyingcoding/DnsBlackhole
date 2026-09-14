@@ -2,12 +2,23 @@ name: dnsblackhole
 
 services:
   dnsblackhole:
+    # build 只是源码构建回退，正常部署走 image；免 clone 的部署片段见 docs/deployment/docker.md
     build:
       context: .
-    image: ${DNSBLACKHOLE_IMAGE:-ghcr.io/wanwan-doudou/dnsblackhole:0.2.5}
+    image: ${DNSBLACKHOLE_IMAGE_REPO:-ghcr.io/wanwan-doudou/dnsblackhole}:${DNSBLACKHOLE_VERSION:-latest}
     restart: unless-stopped
     environment:
       DNSBLACKHOLE_CONTAINER: "1"
+    command:
+      - serve
+      - --data-dir
+      - /var/lib/dnsblackhole
+      - --web-listen
+      - 0.0.0.0:3000
+      - --admin-password-file
+      - /run/secrets/dnsblackhole_admin_password
+    # 默认绑定全部网卡以便服务局域网；只供本机或固定网卡使用时，
+    # 通过 DNSBLACKHOLE_BIND_ADDRESS / DNSBLACKHOLE_BIND_ADDRESS_V6 收窄
     ports:
       - "${DNSBLACKHOLE_BIND_ADDRESS:-0.0.0.0}:53:53/udp"
       - "${DNSBLACKHOLE_BIND_ADDRESS:-0.0.0.0}:53:53/tcp"
@@ -26,6 +37,8 @@ services:
         protocol: tcp
     volumes:
       - dnsblackhole-data:/var/lib/dnsblackhole
+    secrets:
+      - dnsblackhole_admin_password
     tmpfs:
       - /run/dnsblackhole:mode=0755,uid=10001,gid=10001
     read_only: true
@@ -37,3 +50,7 @@ services:
 
 volumes:
   dnsblackhole-data:
+
+secrets:
+  dnsblackhole_admin_password:
+    file: ./dnsblackhole-admin-password.txt

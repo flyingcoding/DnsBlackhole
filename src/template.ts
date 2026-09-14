@@ -34,6 +34,8 @@ export function renderAppTemplate(appIconUrl: string): string {
           <button class="nav-item" data-view="logs" type="button">${t("查询日志")}</button>
           <button class="nav-item" data-view="about" type="button">${t("关于")}</button>
         </nav>
+
+        <button class="ghost-button web-auth-logout" id="web_auth_logout_btn" type="button" data-web-only>${t("退出登录")}</button>
       </div>
 
       <div class="context-nav" id="context_nav">
@@ -682,6 +684,48 @@ export function renderAppTemplate(appIconUrl: string): string {
           </div>
 
           <div class="settings-stack">
+            <section class="settings-section dns-security-section" data-web-only>
+              <div class="section-heading">
+                <h3>${t("Web 管理认证")}</h3>
+                <span>${t("这些设置只影响 Web 管理后台。桌面版由操作系统认证本地用户，不需要登录。")}</span>
+              </div>
+              <form class="web-auth-password-form" id="web_auth_password_form" autocomplete="off">
+                <label class="field">
+                  <span>${t("当前密码")}</span>
+                  <input id="web_auth_current_password" type="password" autocomplete="current-password" maxlength="128" spellcheck="false" required />
+                </label>
+                <label class="field">
+                  <span>${t("新密码")}</span>
+                  <input id="web_auth_new_password" type="password" autocomplete="new-password" maxlength="128" spellcheck="false" required />
+                </label>
+                <label class="field">
+                  <span>${t("确认新密码")}</span>
+                  <input id="web_auth_confirm_password" type="password" autocomplete="new-password" maxlength="128" spellcheck="false" required />
+                </label>
+                <button class="ghost-button" id="web_auth_password_submit" type="submit">${t("修改密码")}</button>
+              </form>
+              <div class="dns-security-options">
+                <label class="field">
+                  <span>${t("会话空闲超时")}</span>
+                  <small>${t("这段时间内没有任何管理操作就要重新登录。会话另有 12 小时的绝对上限，且服务重启后一律需要重新登录。")}</small>
+                  <select id="web_admin_session_idle_minutes">
+                    <option value="15">${t("15 分钟")}</option>
+                    <option value="30">${t("30 分钟")}</option>
+                    <option value="60">${t("1 小时")}</option>
+                    <option value="240">${t("4 小时")}</option>
+                    <option value="720">${t("12 小时")}</option>
+                  </select>
+                </label>
+                <label class="check-row">
+                  <input id="web_admin_secure_cookie" type="checkbox" />
+                  <span>
+                    <strong>${t("会话 Cookie 要求 HTTPS")}</strong>
+                    <small>${t("只有在反向代理上终止了 TLS、始终用 https 打开管理页面时才开启。直接用 http 访问时开启会让浏览器丢弃 Cookie，导致登不上。")}</small>
+                  </span>
+                </label>
+              </div>
+            </section>
+
             <section class="settings-section dns-security-section">
               <div class="section-heading">
                 <h3>${t("客户端访问控制")}</h3>
@@ -866,7 +910,7 @@ export function renderAppTemplate(appIconUrl: string): string {
             <section class="settings-section dns-security-section">
               <div class="section-heading">
                 <h3>${t("安全事件")}</h3>
-                <span>${t("UDP 拒绝仍保持静默丢弃；这里展示拒绝与限速情况，最多保留最近 200 条聚合事件。事件会落盘保存，重启后仍可查看。")}</span>
+                <span>${t("UDP 拒绝仍保持静默丢弃；这里展示拒绝、限速与 Web 管理认证事件，最多保留最近 200 条聚合事件。事件会落盘保存，DNS 未启动时也能查看。")}</span>
               </div>
               <div class="security-stat-grid">
                 <div class="security-stat-card">

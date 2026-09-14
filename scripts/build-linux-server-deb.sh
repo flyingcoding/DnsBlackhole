@@ -39,7 +39,14 @@ cargo build \
   --features web-admin \
   --target "${target}"
 
-binary="src-tauri/target/${target}/release/dnsblackhole-service"
+# `CARGO_TARGET_DIR` 或 Cargo 配置都可能把产物放到仓库外；从 metadata 读取 Cargo
+# 实际使用的绝对目录，避免构建成功后仍去硬编码的 src-tauri/target 找文件。
+cargo_target_dir="$(cargo metadata \
+  --manifest-path src-tauri/Cargo.toml \
+  --format-version 1 \
+  --no-deps \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+binary="${cargo_target_dir}/${target}/release/dnsblackhole-service"
 
 echo "==> 断言产物不链接 GUI 库"
 offenders="$(ldd "${binary}" | grep -iE 'webkit2gtk|libgtk-3|libgdk-3|appindicator' || true)"
@@ -82,7 +89,7 @@ Replaces: dnsblackhole
 Description: DnsBlackhole DNS 过滤服务（无图形界面）
  以 systemd 服务形式运行的 DNS 过滤与拦截核心，自带同源的 Web 管理后台，
  默认监听 0.0.0.0:3000，不依赖 GTK 或 WebKitGTK。
- 本版不内置 Web 登录，请只在可信内网开放 3000 端口。
+ Web 管理要求密码；密码文件缺失或无效时 Web 管理保持关闭，DNS 继续运行。
  安装后服务自动启动，但不会自动接管宿主 DNS，需要在 Web 后台或用
  sudo dnsblackhole-cli system-dns takeover 显式发起。
 CONTROL

@@ -50,6 +50,13 @@ pub(crate) struct AppState {
     protection_paused_until: Arc<AtomicU64>,
     // 启停、配置保存和规则热替换串行执行，避免后台初始化与用户操作互相覆盖
     pub(crate) runtime_update_lock: Mutex<()>,
+    // Web 管理认证的凭据缓存、会话表与登录限速。CLI 走 RPC 改密码时也要能清进程内的会话，
+    // 所以挂在这里而不是只放在 web_admin 的局部状态里。
+    #[cfg(any(
+        all(feature = "web-admin", target_os = "linux"),
+        all(test, feature = "web-admin")
+    ))]
+    pub(crate) web_auth: crate::web_auth::WebAuthState,
 }
 
 #[derive(Debug, Clone)]
@@ -108,7 +115,8 @@ impl AppState {
         data_dir: PathBuf,
     ) -> Self {
         let effective_summary = configured_rule_summary(&config);
-        Self {
+        let security_event_retention_hours = config.security_event_retention_hours;
+        let state = Self {
             config: Mutex::new(config),
             server: Mutex::new(None),
             effective_summary: Mutex::new(effective_summary),
@@ -124,6 +132,56 @@ impl AppState {
             filter_update_cancel: AtomicBool::new(false),
             protection_paused_until: Arc::new(AtomicU64::new(0)),
             runtime_update_lock: Mutex::new(()),
+            #[cfg(any(
+                all(feature = "web-admin", target_os = "linux"),
+                all(test, feature = "web-admin")
+            ))]
+            web_auth: crate::web_auth::WebAuthState::new(),
+        };
+        // 界面读的是内存队列，而 DNS 可能因为端口被占或配置有误起不来。
+        // 启动即回填，别让「安全防护」页在 DNS 停止时看不到任何历史事件。
+        dns::security_events::restore_persisted_security_events(
+            &state.stats,
+            &state.database,
+            security_event_retention_hours,
+        );
+        state
+    }
+
+    /// 记录一条 Web 管理认证的安全事件：并入内存队列后立刻落盘。
+    ///
+    /// 不走 DNS 的写入队列——那条队列只在 DNS 运行时存在，而登录与改密码事件在
+    /// DNS 停止时同样必须留痕。`protocol` 统一记 `tcp`（HTTP 就是跑在 TCP 上），
+    /// 界面对 `web_auth_*` 事件不显示协议列。
+    #[cfg(any(
+        all(feature = "web-admin", target_os = "linux"),
+        all(test, feature = "web-admin")
+    ))]
+    pub(crate) fn record_web_admin_security_event(
+        &self,
+        event_type: dns::SecurityEventType,
+        client_ip: String,
+        reason: String,
+    ) {
+        let mut increment = match self.stats.lock() {
+            Ok(mut stats) => dns::append_security_event(
+                &mut stats,
+                event_type,
+                dns::DnsTransport::Tcp,
+                client_ip,
+                reason,
+            ),
+            Err(_) => return,
+        };
+        // append_security_event 返回的是内存队列里的累计值，而落盘走的是
+        // `count = count + excluded.count`。这里必须只报本次新增，否则连续 3 次
+        // 登录失败会被记成 1+2+3=6。DNS 侧的 persist_security_event 同样如此。
+        increment.count = 1;
+        if let Err(error) = self
+            .database
+            .append_security_events(std::slice::from_ref(&increment))
+        {
+            eprintln!("记录 Web 管理安全事件失败：{error}");
         }
     }
 
@@ -708,6 +766,10 @@ pub(crate) fn save_config_blocking(
     if submitted_schema_version < 18 {
         config.listen_ipv6_host = previous.listen_ipv6_host.clone();
     }
+    if submitted_schema_version < 19 {
+        config.web_admin_session_idle_minutes = previous.web_admin_session_idle_minutes;
+        config.web_admin_secure_cookie = previous.web_admin_secure_cookie;
+    }
     config.validate()?;
     let filter_changed = filter_runtime_changed(&previous, &config);
     let restart_required = needs_dns_restart(&previous, &config);
@@ -744,6 +806,16 @@ pub(crate) fn save_config_blocking(
     })();
     if let Err(error) = applied {
         return Err(state.restore_config_after_failure(&previous, was_running, error));
+    }
+
+    // 开启 Secure 后，旧 Cookie 仍然没有 Secure 属性，继续保留旧会话会让这个开关
+    // 名不副实。清掉现有会话，下一次登录会按新配置签发 Cookie。
+    #[cfg(any(
+        all(feature = "web-admin", target_os = "linux"),
+        all(test, feature = "web-admin")
+    ))]
+    if config.web_admin_secure_cookie && !previous.web_admin_secure_cookie {
+        crate::web_auth::invalidate_sessions(&state).map_err(|failure| failure.message())?;
     }
 
     // 新窗口会立即用于所有查询；物理删除和 VACUUM 放到后台，避免保存配置卡住数秒。
@@ -1816,6 +1888,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_save_preserves_web_auth_settings() {
+        let state = test_state();
+        let current = AppConfig {
+            enabled: false,
+            web_admin_session_idle_minutes: 240,
+            web_admin_secure_cookie: true,
+            ..AppConfig::default()
+        };
+        save_config_blocking(Arc::clone(&state), current.clone()).unwrap();
+        let legacy_submission = AppConfig {
+            schema_version: 18,
+            upstream_dns: "9.9.9.9".into(),
+            web_admin_session_idle_minutes: 60,
+            web_admin_secure_cookie: false,
+            ..current
+        };
+
+        save_config_blocking(Arc::clone(&state), legacy_submission).unwrap();
+
+        let saved = state.current_config().unwrap();
+        assert_eq!(saved.web_admin_session_idle_minutes, 240);
+        assert!(saved.web_admin_secure_cookie);
+        assert_eq!(saved.upstream_dns, "9.9.9.9");
+    }
+
+    #[test]
     fn failed_start_restores_disabled_config() {
         let state = test_state();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1888,6 +1986,59 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].reason, "new");
         assert_eq!(state.stats.lock().unwrap().security_events.len(), 1);
+    }
+
+    #[test]
+    fn new_state_restores_persisted_security_events_without_starting_dns() {
+        let database = Arc::new(Database::open_in_memory().expect("内存数据库应可打开"));
+        let now = crate::dns::stats::current_second();
+        let persisted = crate::dns::SecurityEvent {
+            event_type: crate::dns::SecurityEventType::WebAuthFailed,
+            protocol: crate::dns::DnsTransport::Tcp,
+            client_ip: "192.0.2.9".into(),
+            reason: "密码错误".into(),
+            first_seen_at: now,
+            last_seen_at: now,
+            count: 3,
+        };
+        database
+            .append_security_events(std::slice::from_ref(&persisted))
+            .unwrap();
+
+        let data_dir = std::env::temp_dir().join("dnsblackhole-service-core-test");
+        let state = AppState::new(AppConfig::default(), database, data_dir.clone(), data_dir);
+
+        // DNS 一次都没启动，界面读的内存队列里也应该有这条登录失败记录
+        let events = state.stats.lock().unwrap().security_events.clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].reason, "密码错误");
+        assert_eq!(events[0].count, 3);
+        assert_eq!(state.status(false).stats.security_events.len(), 1);
+    }
+
+    #[cfg(any(
+        all(feature = "web-admin", target_os = "linux"),
+        all(test, feature = "web-admin")
+    ))]
+    #[test]
+    fn repeated_web_admin_events_persist_one_increment_each() {
+        let state = test_state();
+        for _ in 0..3 {
+            state.record_web_admin_security_event(
+                crate::dns::SecurityEventType::WebAuthFailed,
+                "192.0.2.9".into(),
+                "Web 管理登录密码错误".into(),
+            );
+        }
+
+        // 内存队列聚合成一条，计数 3
+        let events = state.stats.lock().unwrap().security_events.clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].count, 3);
+        // 落盘是 `count = count + excluded.count`，所以每次只能报 1；写累计值会得到 1+2+3=6
+        let persisted = state.database.recent_security_events(100).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].count, 3);
     }
 
     #[test]

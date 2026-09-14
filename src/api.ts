@@ -19,6 +19,7 @@ import type {
   WindowsServiceStatus,
   WindowsSystemDnsFallbackSelection,
   WindowsSystemDnsStatus,
+  WebAuthState,
 } from "./types";
 
 export function analyzeCustomRules(rules: string): Promise<RuleAnalysis> {
@@ -40,6 +41,11 @@ type WebRoute = {
 
 const WEB_ROUTES: Record<string, WebRoute> = {
   get_web_version: { method: "GET", path: "/api/v1/admin/version" },
+  get_web_auth_state: { method: "GET", path: "/api/v1/admin/auth/state" },
+  web_auth_setup: { method: "POST", path: "/api/v1/admin/auth/setup" },
+  web_auth_login: { method: "POST", path: "/api/v1/admin/auth/login" },
+  web_auth_logout: { method: "POST", path: "/api/v1/admin/auth/logout" },
+  web_auth_change_password: { method: "POST", path: "/api/v1/admin/auth/password" },
   analyze_custom_rules: { method: "POST", path: "/api/v1/admin/rules/analyze" },
   get_config: { method: "GET", path: "/api/v1/admin/config" },
   save_config: {
@@ -82,6 +88,33 @@ const WEB_ROUTES: Record<string, WebRoute> = {
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** Web 管理接口拒绝时的原因码，与后端 `AuthFailure::code` 一一对应。 */
+export type WebAuthRejection = "setup_required" | "unauthenticated" | "already_configured";
+
+export class WebAuthError extends Error {
+  constructor(
+    readonly reason: WebAuthRejection,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WebAuthError";
+  }
+}
+
+type UnauthorizedHandler = (error: WebAuthError) => void;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+/**
+ * 注册会话失效时的回调。
+ *
+ * 401/403 可能出现在任何一次后台请求上（会话过期、被 CLI 重置密码），
+ * 所以统一在 fetch 出口处理，而不是让每个调用点各写一遍。
+ */
+export function setWebAuthRejectionHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
 }
 
 function timedInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -133,9 +166,45 @@ async function webInvoke<T>(command: string, args: Record<string, unknown>): Pro
   });
   const payload = await readWebResponse(response);
   if (!response.ok) {
+    const rejection = webAuthRejection(payload, response.status);
+    if (rejection) {
+      const error = new WebAuthError(rejection, webErrorMessage(payload, response.status));
+      // 认证端点自己处理这些状态，不该把它们当成“会话失效”再弹一次登录。
+      if (!AUTH_ENDPOINT_COMMANDS.has(command)) {
+        unauthorizedHandler?.(error);
+      }
+      throw error;
+    }
     throw new Error(webErrorMessage(payload, response.status));
   }
   return payload as T;
+}
+
+const AUTH_ENDPOINT_COMMANDS = new Set([
+  "get_web_auth_state",
+  "web_auth_setup",
+  "web_auth_login",
+  "web_auth_logout",
+]);
+
+function webAuthRejection(payload: unknown, status: number): WebAuthRejection | null {
+  if (status !== 401 && status !== 403 && status !== 409) {
+    return null;
+  }
+  const code =
+    payload && typeof payload === "object" && "code" in payload
+      ? String((payload as { code: unknown }).code)
+      : "";
+  if (code === "setup_required") {
+    return "setup_required";
+  }
+  if (code === "unauthenticated") {
+    return "unauthenticated";
+  }
+  if (code === "already_configured") {
+    return "already_configured";
+  }
+  return null;
 }
 
 async function readWebResponse(response: Response): Promise<unknown> {
@@ -158,6 +227,29 @@ export function getWebVersion(): Promise<string> {
     throw new Error("桌面运行时不使用 Web 版本接口");
   }
   return webInvoke<string>("get_web_version", {});
+}
+
+export function getWebAuthState(): Promise<WebAuthState> {
+  return webInvoke<WebAuthState>("get_web_auth_state", {});
+}
+
+export function setupWebAdminPassword(password: string): Promise<void> {
+  return webInvoke<void>("web_auth_setup", { password });
+}
+
+export function loginWebAdmin(password: string): Promise<void> {
+  return webInvoke<void>("web_auth_login", { password });
+}
+
+export function logoutWebAdmin(): Promise<void> {
+  return webInvoke<void>("web_auth_logout", {});
+}
+
+export function changeWebAdminPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  return webInvoke<void>("web_auth_change_password", { currentPassword, newPassword });
 }
 
 export function getConfig(): Promise<AppConfig> {

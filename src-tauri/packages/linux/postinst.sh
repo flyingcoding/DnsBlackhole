@@ -11,6 +11,7 @@ case "$1" in
     chmod 0755 /usr/lib/dnsblackhole/dnsblackhole-service 2>/dev/null || true
     # 本机管理 CLI 只是指向同一个可执行文件的薄入口
     ln -sf /usr/lib/dnsblackhole/dnsblackhole-service /usr/bin/dnsblackhole-cli
+    install -d -m 0700 /etc/dnsblackhole
     install -d -m 0700 /var/lib/dnsblackhole
 
     if [ -d /run/systemd/system ]; then

@@ -182,6 +182,8 @@ export type AppConfig = {
   dns_cache_prefetch_hit_threshold: number;
   runtime_watchdog_enabled: boolean;
   runtime_watchdog_interval_seconds: number;
+  web_admin_session_idle_minutes: number;
+  web_admin_secure_cookie: boolean;
   monitoring_api_enabled: boolean;
   monitoring_api_listen_host: string;
   monitoring_api_port: number;
@@ -275,7 +277,13 @@ export type DnsStats = {
 };
 
 export type SecurityEvent = {
-  event_type: "access_denied" | "rate_limited";
+  event_type:
+    | "access_denied"
+    | "rate_limited"
+    | "web_auth_login"
+    | "web_auth_failed"
+    | "web_auth_locked"
+    | "web_auth_password_changed";
   protocol: "udp" | "tcp";
   client_ip: string;
   reason: string;
@@ -458,4 +466,10 @@ export type HistoryPoint = {
 export type ChartPoint = HistoryPoint & {
   x: number;
   y: number;
+};
+
+/// Web 管理认证的首屏状态。仅 Web 模式使用：桌面版不引入登录。
+export type WebAuthState = {
+  passwordConfigured: boolean;
+  authenticated: boolean;
 };

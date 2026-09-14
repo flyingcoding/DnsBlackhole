@@ -16,6 +16,8 @@ use crate::{
 const DEFAULT_DATA_DIR: &str = "/var/lib/dnsblackhole";
 const SYSTEM_DNS_USAGE: &str = "用法：dnsblackhole-service system-dns <status|takeover>\n\
       dnsblackhole-service system-dns restore [--offline [--keep-desired] [--data-dir <路径>]]";
+#[cfg(feature = "web-admin")]
+const WEB_AUTH_USAGE: &str = "用法：dnsblackhole-service web-auth <status|set-password|reset>";
 
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     let mut arguments = arguments.into_iter();
@@ -35,6 +37,8 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), String> 
         "filters" => filters(&remaining),
         "config" => config(&remaining),
         "system-dns" => system_dns(&remaining),
+        #[cfg(feature = "web-admin")]
+        "web-auth" => web_auth(&remaining),
         "--help" | "-h" | "help" => {
             print_help();
             Ok(())
@@ -54,6 +58,10 @@ fn serve(arguments: &[OsString]) -> Result<(), String> {
     let mut web_listen = Some("0.0.0.0:3000".to_string());
     #[cfg(not(feature = "web-admin"))]
     let web_listen: Option<String> = None;
+    #[cfg(feature = "web-admin")]
+    let mut admin_password_file: Option<PathBuf> = None;
+    #[cfg(not(feature = "web-admin"))]
+    let admin_password_file: Option<PathBuf> = None;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].to_str() {
@@ -87,12 +95,28 @@ fn serve(arguments: &[OsString]) -> Result<(), String> {
                     return Err("当前构建未启用 web-admin feature".to_string());
                 }
             }
+            // 只接受文件路径，不提供环境变量方式：docker inspect 能看到环境变量。
+            Some("--admin-password-file") => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .ok_or_else(|| "--admin-password-file 缺少路径参数".to_string())?;
+                #[cfg(feature = "web-admin")]
+                {
+                    admin_password_file = Some(PathBuf::from(value));
+                }
+                #[cfg(not(feature = "web-admin"))]
+                {
+                    let _ = value;
+                    return Err("当前构建未启用 web-admin feature".to_string());
+                }
+            }
             Some(argument) => return Err(format!("serve 不支持参数：{argument}")),
             None => return Err("serve 参数必须是有效文本".to_string()),
         }
         index += 1;
     }
-    run_linux_daemon(data_dir, bootstrap_config, web_listen)
+    run_linux_daemon(data_dir, bootstrap_config, web_listen, admin_password_file)
 }
 
 fn status(arguments: &[OsString]) -> Result<(), String> {
@@ -277,6 +301,161 @@ fn system_dns_restore(arguments: &[OsString]) -> Result<(), String> {
     print_json(&result)
 }
 
+/// Web 管理密码的本机管理入口。
+///
+/// `set-password` **只从标准输入读**，不接受命令行参数：命令行参数会进 shell history，
+/// 也会出现在 `ps` 的输出里。忘记密码时用 `reset` 清掉，与
+/// `system-dns restore --offline` 同一思路——本机权限即恢复权限。
+#[cfg(feature = "web-admin")]
+fn web_auth(arguments: &[OsString]) -> Result<(), String> {
+    let operation = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| WEB_AUTH_USAGE.to_string())?;
+    match (operation, arguments.len()) {
+        ("status", 1) => {
+            let result: Value = ServiceClient::call("web_auth_status", &json!({}))?;
+            let configured = result
+                .get("configured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            println!(
+                "Web 管理密码：{}",
+                if configured { "已设置" } else { "未设置" }
+            );
+            if let Some(updated) = result.get("updated_at").and_then(Value::as_u64) {
+                println!("最近更新：{}", format_unix_second(updated));
+            }
+            println!(
+                "当前有效会话：{}",
+                result
+                    .get("active_sessions")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            );
+            Ok(())
+        }
+        ("set-password", 1) => {
+            let password = read_password_from_stdin()?;
+            let _: Value =
+                ServiceClient::call("web_auth_set_password", &json!({ "password": password }))?;
+            println!("已设置 Web 管理密码；此前登录的会话全部失效");
+            Ok(())
+        }
+        ("reset", 1) => {
+            let result: Value = ServiceClient::call("web_auth_reset", &json!({}))?;
+            if result.get("cleared").and_then(Value::as_bool) == Some(true) {
+                println!("已清除 Web 管理密码与全部会话；管理页面会回到首次设置状态");
+            } else {
+                println!("当前没有已设置的 Web 管理密码，无需清除");
+            }
+            Ok(())
+        }
+        _ => Err(WEB_AUTH_USAGE.to_string()),
+    }
+}
+
+#[cfg(feature = "web-admin")]
+fn format_unix_second(seconds: u64) -> String {
+    use chrono::{Local, TimeZone};
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| Local.timestamp_opt(seconds, 0).single())
+        .map(|moment| moment.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| format!("Unix {seconds}"))
+}
+
+/// 交互式读取密码。
+///
+/// stdin 是终端时关掉回显并要求输入两次；是管道或重定向时只读一行，
+/// 供部署脚本使用（此时密码在调用方那边的可见性由调用方负责）。
+#[cfg(feature = "web-admin")]
+fn read_password_from_stdin() -> Result<String, String> {
+    use std::io::IsTerminal;
+
+    if !io::stdin().is_terminal() {
+        let password = read_line_from_stdin()?;
+        if password.is_empty() {
+            return Err("未从标准输入读到密码".to_string());
+        }
+        return Ok(password);
+    }
+    let first = prompt_hidden("请输入新的 Web 管理密码：")?;
+    if first.is_empty() {
+        return Err("密码不能为空".to_string());
+    }
+    let second = prompt_hidden("请再次输入以确认：")?;
+    if first != second {
+        return Err("两次输入的密码不一致".to_string());
+    }
+    Ok(first)
+}
+
+#[cfg(feature = "web-admin")]
+fn read_line_from_stdin() -> Result<String, String> {
+    use std::io::BufRead;
+
+    let mut line = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|error| format!("读取密码失败：{error}"))?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+}
+
+#[cfg(feature = "web-admin")]
+fn prompt_hidden(prompt: &str) -> Result<String, String> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("输出提示失败：{error}"))?;
+    let guard = EchoGuard::disable()?;
+    let read = read_line_from_stdin();
+    drop(guard);
+    // 回显是关掉的，用户按下的回车没有回显出来，这里补一个换行。
+    println!();
+    read
+}
+
+/// 关闭 stdin 回显，Drop 时恢复原属性——包括读取失败或中途返回错误的路径。
+#[cfg(feature = "web-admin")]
+struct EchoGuard {
+    original: libc::termios,
+}
+
+#[cfg(feature = "web-admin")]
+impl EchoGuard {
+    fn disable() -> Result<Self, String> {
+        // SAFETY: termios 全零初始化后立刻交给 tcgetattr 填充，只在返回 0 时读取内容。
+        let mut original: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: STDIN_FILENO 是合法 fd，指针指向本函数栈上的结构体。
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &raw mut original) } != 0 {
+            return Err(format!("读取终端属性失败：{}", io::Error::last_os_error()));
+        }
+        let mut quiet = original;
+        quiet.c_lflag &= !libc::ECHO;
+        // SAFETY: 同上；TCSAFLUSH 保证生效前丢掉已缓冲的输入。
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &raw const quiet) } != 0 {
+            return Err(format!("关闭终端回显失败：{}", io::Error::last_os_error()));
+        }
+        Ok(Self { original })
+    }
+}
+
+#[cfg(feature = "web-admin")]
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        // SAFETY: original 就是本对象创建时从同一个 fd 读出的属性。
+        unsafe {
+            libc::tcsetattr(
+                libc::STDIN_FILENO,
+                libc::TCSAFLUSH,
+                &raw const self.original,
+            );
+        }
+    }
+}
+
 fn ensure_no_arguments(command: &str, arguments: &[OsString]) -> Result<(), String> {
     if arguments.is_empty() {
         Ok(())
@@ -297,9 +476,18 @@ fn print_help() {
     print!("{}", help_text());
 }
 
+#[cfg(feature = "web-admin")]
 fn help_text() -> &'static str {
     "DnsBlackhole headless 服务与本机管理 CLI\n\n\
-用法：\n  dnsblackhole-service serve [--data-dir <路径>] [--bootstrap-config <文件>] [--web-listen <地址:端口>]\n  dnsblackhole-service status [--json]\n  dnsblackhole-service healthcheck\n  dnsblackhole-service config <validate|export|apply> <文件|->\n  dnsblackhole-service start|stop\n  dnsblackhole-service filters update\n  dnsblackhole-service system-dns <status|takeover>\n  dnsblackhole-service system-dns restore [--offline [--keep-desired] [--data-dir <路径>]]\n\n\
+用法：\n  dnsblackhole-service serve [--data-dir <路径>] [--bootstrap-config <文件>] [--web-listen <地址:端口>] [--admin-password-file <文件>]\n  dnsblackhole-service status [--json]\n  dnsblackhole-service healthcheck\n  dnsblackhole-service config <validate|export|apply> <文件|->\n  dnsblackhole-service start|stop\n  dnsblackhole-service filters update\n  dnsblackhole-service system-dns <status|takeover>\n  dnsblackhole-service system-dns restore [--offline [--keep-desired] [--data-dir <路径>]]\n  dnsblackhole-service web-auth <status|set-password|reset>\n\n\
+注意：system-dns restore --offline 仅在后台服务无法连接时使用，需要 root 且要求 DnsBlackhole 已释放 53 端口。\n\
+      web-auth set-password 只从标准输入读密码，不接受命令行参数。\n"
+}
+
+#[cfg(not(feature = "web-admin"))]
+fn help_text() -> &'static str {
+    "DnsBlackhole headless 服务与本机管理 CLI\n\n\
+用法：\n  dnsblackhole-service serve [--data-dir <路径>] [--bootstrap-config <文件>]\n  dnsblackhole-service status [--json]\n  dnsblackhole-service healthcheck\n  dnsblackhole-service config <validate|export|apply> <文件|->\n  dnsblackhole-service start|stop\n  dnsblackhole-service filters update\n  dnsblackhole-service system-dns <status|takeover>\n  dnsblackhole-service system-dns restore [--offline [--keep-desired] [--data-dir <路径>]]\n\n\
 注意：system-dns restore --offline 仅在后台服务无法连接时使用，需要 root 且要求 DnsBlackhole 已释放 53 端口。\n"
 }
 

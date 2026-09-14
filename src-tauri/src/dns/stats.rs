@@ -94,6 +94,14 @@ pub struct DnsStats {
 pub enum SecurityEventType {
     AccessDenied,
     RateLimited,
+    /// Web 管理后台登录成功
+    WebAuthLogin,
+    /// Web 管理后台登录失败
+    WebAuthFailed,
+    /// Web 管理后台登录被限速锁定
+    WebAuthLocked,
+    /// Web 管理密码被设置、修改或重置
+    WebAuthPasswordChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,8 +369,23 @@ fn record_security_event(
     client_ip: IpAddr,
     reason: String,
 ) {
+    let event = append_security_event(stats, event_type, protocol, client_ip.to_string(), reason);
+    persist_security_event(stats, event);
+}
+
+/// 把一条事件并入内存队列，返回本次要落盘的条目。
+///
+/// 返回值的 `first_seen_at` 是聚合分组的首次时间，`count` 由调用方按增量语义处理，
+/// 这样内存队列与 `security_events` 表的聚合口径一致。DNS 侧走写入队列落盘，
+/// Web 管理认证自己直接写库（登录事件在 DNS 停止时也必须留痕）。
+pub(crate) fn append_security_event(
+    stats: &mut DnsStats,
+    event_type: SecurityEventType,
+    protocol: DnsTransport,
+    client_ip: String,
+    reason: String,
+) -> SecurityEvent {
     let now = current_second();
-    let client_ip = client_ip.to_string();
     if let Some(last) = stats.security_events.back_mut()
         && last.event_type == event_type
         && last.protocol == protocol
@@ -372,9 +395,7 @@ fn record_security_event(
     {
         last.last_seen_at = now;
         last.count = last.count.saturating_add(1);
-        let event = last.clone();
-        persist_security_event(stats, event);
-        return;
+        return last.clone();
     }
 
     if stats.security_events.len() >= SECURITY_EVENT_CAPACITY {
@@ -389,12 +410,11 @@ fn record_security_event(
         last_seen_at: now,
         count: 1,
     });
-    let event = stats
+    stats
         .security_events
         .back()
         .expect("新事件应已加入队列")
-        .clone();
-    persist_security_event(stats, event);
+        .clone()
 }
 
 fn persist_security_event(stats: &mut DnsStats, mut event: SecurityEvent) {
@@ -411,19 +431,14 @@ fn persist_security_event(stats: &mut DnsStats, mut event: SecurityEvent) {
 /// 启动时把落盘的历史安全事件放回内存队列，让界面重启后仍能看到既有记录。
 /// 队列按 last_seen_at 升序排列，保持与运行期追加顺序一致。
 pub(crate) fn restore_security_events(
-    stats: &Arc<Mutex<DnsStats>>,
+    stats: &mut DnsStats,
     mut events: Vec<SecurityEvent>,
 ) {
-    if events.is_empty() {
-        return;
-    }
     events.sort_by_key(|event| (event.last_seen_at, event.first_seen_at));
     if events.len() > SECURITY_EVENT_CAPACITY {
         events.drain(..events.len() - SECURITY_EVENT_CAPACITY);
     }
-    if let Ok(mut current) = stats.lock() {
-        current.security_events = events.into();
-    }
+    stats.security_events = events.into();
 }
 
 pub(crate) fn record_refused_any(stats: &Arc<Mutex<DnsStats>>) {

@@ -1,0 +1,144 @@
+/* ==========================================================================
+   Web 管理登录门禁
+   --------------------------------------------------------------------------
+   只在 Web 模式出现：桌面版由操作系统认证本地用户，模板里的相关节点会被
+   data-web-only 隐藏。令牌全部沿用 style.css，暗色主题自动跟随。
+   ========================================================================== */
+
+.auth-gate {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  padding: 24px;
+  /* 盖住整页：后面的仪表盘在未登录时不该被读到，也不该被误点。 */
+  background: var(--app-bg);
+  place-items: center;
+  inset: 0;
+  overflow: auto;
+}
+
+/* 主界面保持桌面最小宽度；认证页需要能在手机上完成首次设置和登录。 */
+:root[data-web-auth-gate] body {
+  min-width: 0;
+  min-height: 100%;
+}
+
+.auth-gate-card {
+  display: flex;
+  width: min(420px, 100%);
+  flex-direction: column;
+  border: 1px solid var(--info-1);
+  border-radius: 11px;
+  padding: 28px;
+  background: var(--neutral-0);
+  box-shadow: 0 8px 28px rgb(var(--info-rgb-1) / 0.09);
+  gap: 16px;
+}
+
+.auth-gate-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.auth-gate-brand strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.auth-gate-brand span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-gate-card h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.auth-gate-hint,
+.auth-gate-foot,
+.auth-gate-notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.auth-gate-notice {
+  border: 1px solid var(--field-border);
+  border-radius: var(--field-radius);
+  padding: 9px 11px;
+  color: var(--text);
+  background: var(--button-hover-bg);
+}
+
+.auth-gate-error {
+  margin: 0;
+  color: var(--danger-accent);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.auth-gate-card .field small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-gate-card button.primary {
+  min-height: 44px;
+  margin-top: 4px;
+}
+
+.auth-gate-card .field input {
+  min-height: 44px;
+}
+
+.auth-gate-foot {
+  /* CLI 命令要能整条选中复制，别在中间断行 */
+  word-break: break-word;
+  border-top: 1px solid var(--info-1);
+  padding-top: 14px;
+}
+
+/* --------------------------------------------------------------------------
+   顶栏登出入口与设置页的改密码区块
+   -------------------------------------------------------------------------- */
+
+/* .header-inner 是两列网格。第三个子元素会被自动放进隐式第二行，
+   撑破 64px 的固定高度并压在二级导航条上，所以这里显式补一列。
+   只在 Web 模式加列：桌面版这个按钮是 display:none，列数与布局保持不动。 */
+:root[data-runtime="web"] .header-inner {
+  grid-template-columns: minmax(190px, auto) minmax(0, 1fr) auto;
+}
+
+.web-auth-logout {
+  align-self: center;
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.web-auth-password-form {
+  display: grid;
+  /* 三个输入框在窄屏下自动落成一列，不写断点 */
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  align-items: end;
+  gap: 16px;
+}
+
+.web-auth-password-form > button {
+  /* .field 是 flex 容器，按钮要用 align-self 对齐到输入框底边 */
+  height: var(--field-height);
+  align-self: end;
+}
+
+@media (max-width: 520px) {
+  .auth-gate {
+    padding: 16px;
+  }
+
+  .auth-gate-card {
+    padding: 22px 20px;
+  }
+}

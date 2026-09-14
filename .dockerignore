@@ -12,4 +12,5 @@ node_modules
 src-tauri/binaries
 src-tauri/target
 docker/bootstrap-config.json
+dnsblackhole-admin-password.txt
 新版本规划

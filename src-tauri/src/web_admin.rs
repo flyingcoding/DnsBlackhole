@@ -1,10 +1,10 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, State},
+    extract::{ConnectInfo, DefaultBodyLimit, State},
     http::{
         HeaderMap, HeaderValue, Request, StatusCode, Uri,
-        header::{CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN},
+        header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -25,11 +25,16 @@ use std::{
 };
 
 use crate::{
-    config::AppConfig, config_transfer, dns::RuntimeStatus, privileged_bridge::rpc_server,
+    config::AppConfig,
+    config_transfer,
+    dns::RuntimeStatus,
+    privileged_bridge::rpc_server,
     service_core::AppState,
+    web_auth::{self, AuthFailure, AuthOutcome},
 };
 
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_AUTH_REQUEST_BYTES: usize = 1024;
 
 #[derive(RustEmbed)]
 #[folder = "../dist/"]
@@ -68,6 +73,9 @@ struct DiagnosticExportRequest {
 struct ApiError {
     status: StatusCode,
     message: String,
+    /// 机器可读的原因码。前端只靠它区分"去设置密码"和"去登录"，
+    /// 不去猜 403 到底是 Host 校验没过还是密码还没设。
+    code: Option<&'static str>,
 }
 
 impl ApiError {
@@ -75,6 +83,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            code: None,
         }
     }
 
@@ -82,6 +91,7 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
+            code: None,
         }
     }
 
@@ -89,13 +99,37 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
+            code: None,
+        }
+    }
+}
+
+impl From<AuthFailure> for ApiError {
+    fn from(failure: AuthFailure) -> Self {
+        let status = match &failure {
+            // 未设密码：明确告诉调用方要先走首次设置，而不是让它去登录。
+            AuthFailure::SetupRequired => StatusCode::FORBIDDEN,
+            AuthFailure::AlreadyConfigured => StatusCode::CONFLICT,
+            AuthFailure::Unauthenticated | AuthFailure::InvalidPassword => StatusCode::UNAUTHORIZED,
+            AuthFailure::Locked { .. } => StatusCode::TOO_MANY_REQUESTS,
+            AuthFailure::Invalid(_) => StatusCode::BAD_REQUEST,
+            AuthFailure::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self {
+            status,
+            message: failure.message(),
+            code: Some(failure.code()),
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        let body = match self.code {
+            Some(code) => json!({ "error": self.message, "code": code }),
+            None => json!({ "error": self.message }),
+        };
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -118,6 +152,7 @@ pub(crate) fn start(
         core,
         request_security: Arc::new(RequestSecurity::load()),
     };
+    web_auth::log_startup_state(&state.core, listen);
     let router = router(state);
 
     eprintln!("Web 管理后台正在监听 http://{address}");
@@ -163,11 +198,43 @@ pub(crate) fn start(
 }
 
 fn router(state: WebState) -> Router {
+    // 认证挂在这一层：所有管理接口先经过 require_authentication，
+    // 新增路由只要加进 protected 就自动带上认证，不存在漏挂某个 handler 的可能。
+    let protected = admin_routes()
+        .route(
+            "/api/v1/admin/auth/password",
+            post(auth_change_password).layer(DefaultBodyLimit::max(MAX_AUTH_REQUEST_BYTES)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_authentication,
+        ));
     Router::new()
+        // healthcheck 与首次设置/登录必须免认证，否则容器起不来、密码也没法设。
         .route("/health", get(health))
+        .route("/api/v1/admin/auth/state", get(auth_state))
+        .route(
+            "/api/v1/admin/auth/setup",
+            post(auth_setup).layer(DefaultBodyLimit::max(MAX_AUTH_REQUEST_BYTES)),
+        )
+        .route(
+            "/api/v1/admin/auth/login",
+            post(auth_login).layer(DefaultBodyLimit::max(MAX_AUTH_REQUEST_BYTES)),
+        )
+        .route("/api/v1/admin/auth/logout", post(auth_logout))
+        .merge(protected)
+        .fallback(static_asset)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn(security_headers))
+        .with_state(state)
+}
+
+fn admin_routes() -> Router<WebState> {
+    Router::new()
         .route("/api/v1/admin/version", get(version))
         .route("/api/v1/admin/config", get(get_config).put(save_config))
         .route("/api/v1/admin/config/import", post(import_config))
+        .route("/api/v1/admin/storage", get(get_storage_info))
         .route("/api/v1/admin/status", get(get_status))
         .route("/api/v1/admin/status/query", post(query_status))
         .route("/api/v1/admin/query-logs/search", post(search_query_logs))
@@ -199,10 +266,6 @@ fn router(state: WebState) -> Router {
             post(take_over_system_dns),
         )
         .route("/api/v1/admin/system-dns/restore", post(restore_system_dns))
-        .fallback(static_asset)
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
-        .layer(middleware::from_fn(security_headers))
-        .with_state(state)
 }
 
 impl RequestSecurity {
@@ -242,6 +305,147 @@ impl RequestSecurity {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct PasswordRequest {
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// 认证中间件。这是唯一的注入点：受保护路由全部经过它。
+async fn require_authentication(
+    State(state): State<WebState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let cookie = header_text(request.headers(), COOKIE);
+    match web_auth::authorize(&state.core, cookie.as_deref()) {
+        AuthOutcome::Authorized => next.run(request).await,
+        AuthOutcome::Rejected(failure) => ApiError::from(failure).into_response(),
+    }
+}
+
+/// 首屏用它决定进首次设置页、登录页还是直接进后台。免认证。
+async fn auth_state(State(state): State<WebState>, headers: HeaderMap) -> ApiResult<Response> {
+    state.request_security.validate(&headers, false)?;
+    let cookie = header_text(&headers, COOKIE);
+    let outcome = web_auth::authorize(&state.core, cookie.as_deref());
+    let (configured, authenticated) = match &outcome {
+        AuthOutcome::Authorized => (true, true),
+        AuthOutcome::Rejected(AuthFailure::SetupRequired) => (false, false),
+        AuthOutcome::Rejected(AuthFailure::Unauthenticated) => (true, false),
+        AuthOutcome::Rejected(failure) => return Err(ApiError::from(failure.clone())),
+    };
+    Ok(Json(json!({
+        "passwordConfigured": configured,
+        "authenticated": authenticated,
+    }))
+    .into_response())
+}
+
+async fn auth_setup(
+    State(state): State<WebState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<PasswordRequest>,
+) -> ApiResult<Response> {
+    state.request_security.validate(&headers, true)?;
+    let core = Arc::clone(&state.core);
+    let client = peer.ip();
+    let token =
+        blocking(move || web_auth::setup_password(&core, client, &request.password)).await??;
+    Ok(session_response(&state, &token))
+}
+
+async fn auth_login(
+    State(state): State<WebState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<PasswordRequest>,
+) -> ApiResult<Response> {
+    state.request_security.validate(&headers, true)?;
+    let core = Arc::clone(&state.core);
+    let client = peer.ip();
+    let token = blocking(move || web_auth::login(&core, client, &request.password)).await??;
+    Ok(session_response(&state, &token))
+}
+
+async fn auth_logout(State(state): State<WebState>, headers: HeaderMap) -> ApiResult<Response> {
+    state.request_security.validate(&headers, true)?;
+    let cookie = header_text(&headers, COOKIE);
+    web_auth::logout(&state.core, cookie.as_deref());
+    let mut response = Json(json!({ "ok": true })).into_response();
+    set_cookie(
+        &mut response,
+        &web_auth::cleared_session_cookie(web_auth::secure_cookie_enabled(&state.core)),
+    );
+    Ok(response)
+}
+
+async fn auth_change_password(
+    State(state): State<WebState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<ChangePasswordRequest>,
+) -> ApiResult<Response> {
+    state.request_security.validate(&headers, true)?;
+    let core = Arc::clone(&state.core);
+    let client = peer.ip();
+    let cookie = header_text(&headers, COOKIE);
+    blocking(move || {
+        web_auth::change_password(
+            &core,
+            client,
+            cookie.as_deref(),
+            &request.current_password,
+            &request.new_password,
+        )
+    })
+    .await??;
+    Ok(Json(json!({ "ok": true })).into_response())
+}
+
+/// Argon2id 单次校验是几十毫秒级的 CPU 工作，不能压在 async 执行器上。
+async fn blocking<T, F>(task: F) -> ApiResult<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| ApiError::internal(format!("认证任务异常：{error}")))
+}
+
+fn session_response(state: &WebState, token: &str) -> Response {
+    let mut response = Json(json!({ "ok": true })).into_response();
+    set_cookie(
+        &mut response,
+        &web_auth::session_cookie(token, web_auth::secure_cookie_enabled(&state.core)),
+    );
+    response
+}
+
+fn set_cookie(response: &mut Response, value: &str) {
+    match HeaderValue::from_str(value) {
+        Ok(header) => {
+            response.headers_mut().insert(SET_COOKIE, header);
+        }
+        Err(error) => eprintln!("构造会话 Cookie 失败：{error}"),
+    }
+}
+
+fn header_text(headers: &HeaderMap, name: axum::http::HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
 async fn version(State(state): State<WebState>, headers: HeaderMap) -> ApiResult<Response> {
     state.request_security.validate(&headers, false)?;
     Ok(Json(env!("CARGO_PKG_VERSION")).into_response())
@@ -276,6 +480,8 @@ macro_rules! mutation_handler {
 }
 
 read_handler!(get_config, "get_config", Value::Null);
+// api.ts 的 WEB_ROUTES 一直有这条，但 router 里漏了，Web 模式下「数据存储」占用一直是 404
+read_handler!(get_storage_info, "get_storage_info", Value::Null);
 read_handler!(
     get_status,
     "get_status",
@@ -456,7 +662,7 @@ async fn static_asset(uri: Uri) -> Response {
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
-    let is_api = request.uri().path().starts_with("/api/");
+    let is_api = request.uri().path().starts_with("/api/") || request.uri().path() == "/health";
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(

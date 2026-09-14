@@ -57,6 +57,38 @@ impl SecurityEventWriter {
     }
 }
 
+/// 把落盘的历史安全事件放回内存队列（界面读的是内存队列，不是数据库）。
+///
+/// 服务进程启动时调用一次，DNS 每次启动清空运行期统计后再调用一次。
+/// 只在 `DnsServer::start` 里回填是不够的：DNS 起不来（端口被占、配置有误）时
+/// 界面就一条历史事件都看不到，而这恰恰是最需要看到"有人在爆破管理密码"的时候。
+///
+/// `restore_security_events` 是整体替换而不是追加，所以重复调用不会把同一批事件算两遍。
+pub(crate) fn restore_persisted_security_events(
+    stats: &Arc<Mutex<DnsStats>>,
+    database: &Database,
+    retention_hours: u32,
+) {
+    // Web 认证事件也按 stats -> database 的顺序加锁。这里在读库和替换期间持有
+    // stats 锁，避免认证事件刚写入内存又被稍早取得的数据库快照覆盖掉。
+    let mut stats = match stats.lock() {
+        Ok(stats) => stats,
+        Err(_) => {
+            eprintln!("读取内存安全事件失败");
+            return;
+        }
+    };
+    match database.recent_security_events(super::SECURITY_EVENT_CAPACITY) {
+        Ok(mut events) => {
+            let since =
+                super::stats::current_second().saturating_sub(u64::from(retention_hours) * 3600);
+            events.retain(|event| event.last_seen_at >= since);
+            super::stats::restore_security_events(&mut stats, events);
+        }
+        Err(error) => eprintln!("读取历史安全事件失败：{error}"),
+    }
+}
+
 /// 调用方持有 stats 锁，等待此前事件全部提交后再清除/裁剪数据。
 /// 写线程不访问 stats，因此队列满时背压和此屏障均不会形成锁循环。
 pub(crate) fn flush_security_events(stats: &DnsStats) -> Result<(), String> {
@@ -153,7 +185,7 @@ mod tests {
         }
         writer.stop();
         super::super::stats::restore_security_events(
-            &stats,
+            &mut stats.lock().unwrap(),
             database.recent_security_events(200).unwrap(),
         );
         let writer = SecurityEventWriter::start(Arc::clone(&stats), Arc::clone(&database));

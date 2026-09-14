@@ -11,5 +11,7 @@ services:
       - /var/lib/dnsblackhole
       - --web-listen
       - 0.0.0.0:3000
+      - --admin-password-file
+      - /run/secrets/dnsblackhole_admin_password
       - --bootstrap-config
       - /etc/dnsblackhole/config.json

@@ -83,6 +83,7 @@ import {
   domainRankingQuery,
   parseQueryLogHours,
 } from "./query-log-query";
+import { ensureWebAuthenticated, installWebAuthControls } from "./login";
 import { renderAppTemplate } from "./template";
 import {
   applyTheme,
@@ -168,9 +169,10 @@ import type {
 import "./styles/query-log.css";
 import "./style.css";
 import "./styles/ui-extras.css";
+import "./styles/auth.css";
 
 const frontendStartedAt = performance.now();
-const CURRENT_CONFIG_SCHEMA_VERSION = 18;
+const CURRENT_CONFIG_SCHEMA_VERSION = 19;
 
 function logLoadTime(
   module: string,
@@ -204,11 +206,11 @@ logLoadTime("页面模板渲染", templateStarted);
 
 const isDesktopRuntime = isTauriRuntime();
 document.documentElement.dataset.runtime = isDesktopRuntime ? "desktop" : "web";
-if (!isDesktopRuntime) {
-  document.querySelectorAll<HTMLElement>("[data-desktop-only]").forEach((element) => {
+document
+  .querySelectorAll<HTMLElement>(isDesktopRuntime ? "[data-web-only]" : "[data-desktop-only]")
+  .forEach((element) => {
     element.classList.add("hidden");
   });
-}
 
 let activeView: ViewName = "dashboard";
 let filtersState: FilterSubscription[] = [];
@@ -751,6 +753,8 @@ const upstreamTaskQueueRejected = query<HTMLElement>("#upstream_task_queue_rejec
 const tcpConnectionRejected = query<HTMLElement>("#tcp_connection_rejected");
 const securityEventBody = query<HTMLDivElement>("#security_event_body");
 const securityEventRetentionInput = query<HTMLSelectElement>("#security_event_retention_hours");
+const webAdminSessionIdleInput = query<HTMLSelectElement>("#web_admin_session_idle_minutes");
+const webAdminSecureCookieInput = query<HTMLInputElement>("#web_admin_secure_cookie");
 const clearSecurityEventsButton = query<HTMLButtonElement>("#clear_security_events_btn");
 const themePreferenceInput = query<HTMLSelectElement>("#theme_preference");
 const languagePreferenceInput = query<HTMLSelectElement>("#language_preference");
@@ -982,6 +986,7 @@ function syncCustomSelect(select: HTMLSelectElement): void {
   themePreferenceInput,
   languagePreferenceInput,
   securityEventRetentionInput,
+  webAdminSessionIdleInput,
   queryLogTimeRange,
   queryLogSource,
   queryLogQueryType,
@@ -2753,6 +2758,8 @@ async function loadConfig(force = false): Promise<boolean> {
     statisticsEnabledInput.checked = config.statistics_enabled;
     setStatisticsRetentionValue(config.statistics_retention_hours);
     setSecurityEventRetentionValue(config.security_event_retention_hours);
+    setWebAdminSessionIdleValue(config.web_admin_session_idle_minutes);
+    webAdminSecureCookieInput.checked = config.web_admin_secure_cookie;
     systemHostsEnabledInput.checked = config.system_hosts_enabled;
     dnsCacheEnabledInput.checked = config.dns_cache_enabled;
     dnsCacheSizeInput.value = String(config.dns_cache_size);
@@ -3544,6 +3551,8 @@ function collectConfig(): AppConfig {
     statistics_enabled: statisticsEnabledInput.checked,
     statistics_retention_hours: selectedStatisticsRetentionHours(),
     security_event_retention_hours: Number(securityEventRetentionInput.value || 720),
+    web_admin_session_idle_minutes: Number(webAdminSessionIdleInput.value || 60),
+    web_admin_secure_cookie: webAdminSecureCookieInput.checked,
     dns_cache_enabled: dnsCacheEnabledInput.checked,
     dns_cache_size: Number(dnsCacheSizeInput.value || 0),
     dns_cache_min_ttl: Number(dnsCacheMinTtlInput.value || 0),
@@ -4481,9 +4490,12 @@ function renderCacheStats(status: RuntimeStatus): void {
 }
 
 function renderSecurityEvent(event: SecurityEvent): string {
-  const eventLabel = event.event_type === "rate_limited" ? t("触发限速") : t("访问拒绝");
+  const eventLabel = securityEventLabel(event.event_type);
   const clientLabel = clientDisplayName(event.client_ip) ?? event.client_ip;
-  const detail = `${event.protocol.toUpperCase()} · ${event.reason}`;
+  // Web 管理认证事件都走 HTTP over TCP，把 TCP 标出来只是噪声，只留原因文本。
+  const detail = isWebAuthEvent(event.event_type)
+    ? event.reason
+    : `${event.protocol.toUpperCase()} · ${event.reason}`;
   const detailTitle =
     event.count > 1
       ? t("{p0}；首次：{p1} {p2}", { p0: detail, p1: formatLogDate(event.first_seen_at), p2: formatLogTime(event.first_seen_at) })
@@ -4505,6 +4517,27 @@ function renderSecurityEvent(event: SecurityEvent): string {
       <strong class="security-event-count" role="cell">${escapeHtml(formatCount(event.count))}</strong>
     </div>
   `;
+}
+
+function securityEventLabel(eventType: SecurityEvent["event_type"]): string {
+  switch (eventType) {
+    case "rate_limited":
+      return t("触发限速");
+    case "web_auth_login":
+      return t("管理登录成功");
+    case "web_auth_failed":
+      return t("管理登录失败");
+    case "web_auth_locked":
+      return t("管理登录锁定");
+    case "web_auth_password_changed":
+      return t("管理密码变更");
+    default:
+      return t("访问拒绝");
+  }
+}
+
+function isWebAuthEvent(eventType: SecurityEvent["event_type"]): boolean {
+  return eventType.startsWith("web_auth_");
 }
 
 function formatFilterRuleSummary(filter: FilterSubscription): string {
@@ -4674,6 +4707,15 @@ function setSecurityEventRetentionValue(hours: number): void {
     : (options.find((option) => option >= hours) ?? options[options.length - 1]);
   securityEventRetentionInput.value = String(matched);
   syncCustomSelect(securityEventRetentionInput);
+}
+
+function setWebAdminSessionIdleValue(minutes: number): void {
+  const options = Array.from(webAdminSessionIdleInput.options).map((option) => Number(option.value));
+  const matched = options.includes(minutes)
+    ? minutes
+    : (options.find((option) => option >= minutes) ?? options[options.length - 1]);
+  webAdminSessionIdleInput.value = String(matched);
+  syncCustomSelect(webAdminSessionIdleInput);
 }
 
 function setStatisticsRetentionValue(hours: number): void {
@@ -6002,8 +6044,18 @@ if (viewAfterReload) {
   applyViewVisibility(viewAfterReload);
 }
 
-void bootstrapApplication().catch((error) => {
+// Web 模式先过认证门禁：未设密码进首次设置页、未登录进登录页，通过后才继续启动。
+// 桌面版不走这条路，操作系统已经认证了本地用户。
+void startApplication().catch((error) => {
   console.error("应用启动失败", error);
   showMessage(t("应用启动失败：{p0}", { p0: String(error) }), true);
   logLoadTime("前端启动失败", frontendStartedAt, String(error));
 });
+
+async function startApplication(): Promise<void> {
+  if (!isDesktopRuntime) {
+    await ensureWebAuthenticated();
+    installWebAuthControls({ showMessage, confirmAction });
+  }
+  await bootstrapApplication();
+}

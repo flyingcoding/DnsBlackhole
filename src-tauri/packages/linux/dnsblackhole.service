@@ -7,7 +7,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/lib/dnsblackhole/dnsblackhole-service serve --data-dir /var/lib/dnsblackhole
+# 首次安装推荐预先创建这个仅 root 可读的文件。文件缺失或无效时 DNS 仍运行，
+# 但 Web 管理不会监听，避免首次设置接口直接暴露到局域网。
+ExecStart=/usr/lib/dnsblackhole/dnsblackhole-service serve --data-dir /var/lib/dnsblackhole --admin-password-file /etc/dnsblackhole/admin-password
 Restart=on-failure
 RestartSec=3
 # 停止时走 SIGTERM，daemon 自己会恢复宿主 DNS 并保留接管意图，别让 systemd 提前强杀

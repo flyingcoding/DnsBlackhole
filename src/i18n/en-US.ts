@@ -377,8 +377,8 @@ export const enUS: Record<string, string> = {
 
   // ---------- 安全事件 ----------
   "安全事件": "Security events",
-  "UDP 拒绝仍保持静默丢弃；这里展示拒绝与限速情况，最多保留最近 200 条聚合事件。事件会落盘保存，重启后仍可查看。":
-    "Denied UDP queries are still dropped silently. This lists denials and rate limiting, keeping the 200 most recent aggregated events. Events are stored on disk and survive a restart.",
+  "UDP 拒绝仍保持静默丢弃；这里展示拒绝、限速与 Web 管理认证事件，最多保留最近 200 条聚合事件。事件会落盘保存，DNS 未启动时也能查看。":
+    "Denied UDP queries are still dropped silently. This lists denials, rate limiting and web admin sign-in events, keeping the 200 most recent aggregated events. Events are stored on disk and stay visible even while DNS is not running.",
   "访问拒绝": "Access denied",
   "限速触发": "Rate limited",
   "UDP 静默丢弃": "UDP dropped silently",
@@ -1132,4 +1132,54 @@ export const enUS: Record<string, string> = {
   "统计数据加载失败：{p0}": "Statistics failed to load: {p0}",
   "所选统计范围内暂无请求": "No requests in the selected range",
   "暂无可排行的数据": "No rankable data yet",
+
+  // ---------- Web 管理认证 ----------
+  "Web 管理认证": "Web admin authentication",
+  "这些设置只影响 Web 管理后台。桌面版由操作系统认证本地用户，不需要登录。":
+    "These settings apply to the web admin only. The desktop app relies on the operating system to authenticate the local user, so it has no sign-in.",
+  "当前密码": "Current password",
+  "新密码": "New password",
+  "确认新密码": "Confirm new password",
+  "修改密码": "Change password",
+  "会话空闲超时": "Session idle timeout",
+  "这段时间内没有任何管理操作就要重新登录。会话另有 12 小时的绝对上限，且服务重启后一律需要重新登录。":
+    "Sign in again after this long without any management action. Sessions also have a hard 12-hour cap, and restarting the service always requires signing in again.",
+  "15 分钟": "15 minutes",
+  "30 分钟": "30 minutes",
+  "1 小时": "1 hour",
+  "4 小时": "4 hours",
+  "暂时无法连接管理服务": "Unable to reach the admin service",
+  "浏览器无法读取认证状态。请检查服务状态和网络连接，然后重试。":
+    "The browser could not read the authentication state. Check the service and network connection, then try again.",
+  "会话 Cookie 要求 HTTPS": "Require HTTPS for the session cookie",
+  "只有在反向代理上终止了 TLS、始终用 https 打开管理页面时才开启。直接用 http 访问时开启会让浏览器丢弃 Cookie，导致登不上。":
+    "Turn this on only when a reverse proxy terminates TLS and you always open the admin page over https. Over plain http the browser drops the cookie and sign-in never succeeds.",
+  "登录 DnsBlackhole": "Sign in to DnsBlackhole",
+  "设置管理密码": "Set an admin password",
+  "这个管理页面在局域网内可达，任何能访问它的设备都能改配置、停 DNS、看全部查询记录。请先设置一个管理密码。":
+    "This page is reachable from your local network, and any device that can open it could change settings, stop DNS, or read every query. Set an admin password first.",
+  "请输入管理密码以继续管理这台 DnsBlackhole。": "Enter the admin password to keep managing this DnsBlackhole.",
+  "管理密码": "Admin password",
+  "再次输入以确认": "Confirm password",
+  "至少 {p0} 个字符，最多 {p1} 字节。": "At least {p0} characters and no more than {p1} bytes.",
+  "设置并进入": "Save and continue",
+  "登录": "Sign in",
+  "请输入管理密码": "Enter the admin password",
+  "管理密码至少需要 {p0} 个字符": "The admin password needs at least {p0} characters",
+  "管理密码不能超过 {p0} 字节": "The admin password cannot exceed {p0} bytes",
+  "管理密码不能包含控制字符": "The admin password cannot contain control characters",
+  "两次输入的密码不一致": "The two passwords do not match",
+  "也可以在这台机器上执行 dnsblackhole-service web-auth set-password 来设置。":
+    "You can also run dnsblackhole-service web-auth set-password on this machine.",
+  "忘记密码时在这台机器上执行 dnsblackhole-service web-auth reset 清除后重设。":
+    "If you forget it, run dnsblackhole-service web-auth reset on this machine and set a new one.",
+  "退出登录": "Sign out",
+  "将结束当前浏览器的管理会话，需要重新输入密码才能继续管理。":
+    "This ends the management session in this browser. You will need the password again to continue.",
+  "管理密码已更新，其它设备上的会话已失效": "Admin password updated. Sessions on other devices are signed out.",
+  "修改管理密码失败：{p0}": "Could not change the admin password: {p0}",
+  "管理登录成功": "Admin sign-in",
+  "管理登录失败": "Failed sign-in",
+  "管理登录锁定": "Sign-in locked",
+  "管理密码变更": "Admin password changed",
 };

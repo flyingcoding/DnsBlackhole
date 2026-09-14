@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "不带 v 前缀的正式版本号，例如 0.2.5"
+        description: "不带 v 前缀的正式版本号，例如 0.2.6"
         required: true
         type: string
       publish:
@@ -56,7 +56,10 @@ jobs:
           const cargoLock = fs.readFileSync("src-tauri/Cargo.lock", "utf8");
           const cargoVersion = /^version\s*=\s*"([^"]+)"/m.exec(cargoToml)?.[1];
           const lockVersion = /\[\[package\]\]\s*name\s*=\s*"dnsblackhole"\s*version\s*=\s*"([^"]+)"/m.exec(cargoLock)?.[1];
-          const versions = { packageVersion, tauriVersion, cargoVersion, lockVersion };
+          // 容器镜像标签来自 .env 的 DNSBLACKHOLE_VERSION，漏改会让 compose 拉到上一版镜像
+          const dotenv = fs.readFileSync(".env", "utf8");
+          const composeVersion = /^DNSBLACKHOLE_VERSION\s*=\s*(\S+)\s*$/m.exec(dotenv)?.[1];
+          const versions = { packageVersion, tauriVersion, cargoVersion, lockVersion, composeVersion };
           const mismatches = Object.entries(versions).filter(([, value]) => value !== expected);
           if (mismatches.length > 0) {
             throw new Error(`项目版本号未统一为 ${expected}：${JSON.stringify(versions)}`);
@@ -156,10 +159,16 @@ jobs:
         run: |
           set -euo pipefail
           image_ref="${RELEASE_IMAGE}:${RELEASE_VERSION}"
+          admin_password="dnsblackhole-release-smoke-password"
+          password_file="${RUNNER_TEMP}/dnsblackhole-release-admin-password"
+          cookie_jar="${RUNNER_TEMP}/dnsblackhole-release-cookies"
           if [ "${{ inputs.publish }}" = "true" ]; then
             image_ref="${RELEASE_IMAGE}@${IMAGE_DIGEST}"
           fi
 
+          printf '%s\n' "${admin_password}" > "${password_file}"
+          sudo chown 10001:10001 "${password_file}"
+          chmod 0400 "${password_file}"
           docker volume create dnsblackhole-release-data >/dev/null
           docker run --detach \
             --name dnsblackhole-release-smoke \
@@ -168,8 +177,13 @@ jobs:
             --cap-add NET_BIND_SERVICE \
             --tmpfs /run/dnsblackhole:mode=0755,uid=10001,gid=10001 \
             --mount type=volume,source=dnsblackhole-release-data,target=/var/lib/dnsblackhole \
+            --mount "type=bind,source=${password_file},target=/run/secrets/admin-password,readonly" \
             --publish 127.0.0.1:3000:3000 \
-            "${image_ref}" >/dev/null
+            "${image_ref}" \
+            serve \
+            --data-dir /var/lib/dnsblackhole \
+            --web-listen 0.0.0.0:3000 \
+            --admin-password-file /run/secrets/admin-password >/dev/null
 
           for _ in $(seq 1 45); do
             health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' dnsblackhole-release-smoke)"
@@ -186,8 +200,21 @@ jobs:
 
           test "$(docker inspect --format '{{.State.Health.Status}}' dnsblackhole-release-smoke)" = "healthy"
           docker exec dnsblackhole-release-smoke /usr/local/bin/dnsblackhole-service healthcheck
-          test "$(curl --fail --silent --show-error http://127.0.0.1:3000/api/v1/admin/version)" = "\"${RELEASE_VERSION}\""
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/v1/admin/auth/state)" = "404"
+          auth_state="$(curl --fail --silent --show-error http://127.0.0.1:3000/api/v1/admin/auth/state)"
+          AUTH_STATE="${auth_state}" node --input-type=module <<'NODE'
+          const state = JSON.parse(process.env.AUTH_STATE);
+          if (!state.passwordConfigured || state.authenticated) {
+            throw new Error(`认证初始状态不正确：${process.env.AUTH_STATE}`);
+          }
+          NODE
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/v1/admin/version)" = "401"
+          curl --fail --silent --show-error \
+            --cookie-jar "${cookie_jar}" \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: http://127.0.0.1:3000' \
+            --data "{\"password\":\"${admin_password}\"}" \
+            http://127.0.0.1:3000/api/v1/admin/auth/login >/dev/null
+          test "$(curl --fail --silent --show-error --cookie "${cookie_jar}" http://127.0.0.1:3000/api/v1/admin/version)" = "\"${RELEASE_VERSION}\""
 
       - name: 生成容器发布元数据
         if: inputs.publish
@@ -238,3 +265,4 @@ jobs:
         run: |
           docker rm --force dnsblackhole-release-smoke >/dev/null 2>&1 || true
           docker volume rm dnsblackhole-release-data >/dev/null 2>&1 || true
+          rm -f "${RUNNER_TEMP}/dnsblackhole-release-admin-password" "${RUNNER_TEMP}/dnsblackhole-release-cookies"

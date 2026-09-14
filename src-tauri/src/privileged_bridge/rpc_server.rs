@@ -98,6 +98,12 @@ struct MigrationParams {
     target_path: String,
 }
 
+#[cfg(all(feature = "web-admin", target_os = "linux"))]
+#[derive(Debug, Deserialize)]
+struct WebAuthPasswordParams {
+    password: String,
+}
+
 pub(crate) fn initialize_state(
     default_dir: PathBuf,
     #[cfg(target_os = "linux")] bootstrap_config: Option<&Path>,
@@ -421,6 +427,29 @@ pub(crate) fn dispatch_request(
             Arc::clone(state),
             false,
         )?)?,
+        // Web 管理密码只走本机 RPC 改：这条通道靠文件系统权限与调用方身份校验，
+        // 不叠加密码，也正好当作忘记密码时的恢复路径。
+        #[cfg(all(feature = "web-admin", target_os = "linux"))]
+        "web_auth_status" => {
+            to_value(crate::web_auth::status(state).map_err(|failure| failure.message())?)?
+        }
+        #[cfg(all(feature = "web-admin", target_os = "linux"))]
+        "web_auth_set_password" => {
+            let params: WebAuthPasswordParams = parse_params(params)?;
+            crate::web_auth::set_password_locally(
+                state,
+                &params.password,
+                crate::web_auth::PasswordOrigin::LocalCli,
+            )
+            .map_err(|failure| failure.message())?;
+            to_value(crate::web_auth::status(state).map_err(|failure| failure.message())?)?
+        }
+        #[cfg(all(feature = "web-admin", target_os = "linux"))]
+        "web_auth_reset" => {
+            let cleared =
+                crate::web_auth::reset_password(state).map_err(|failure| failure.message())?;
+            serde_json::json!({ "cleared": cleared })
+        }
         "restart_service" => return Ok((Value::Null, true)),
         _ => return Err(format!("未知的后台服务方法：{method}")),
     };

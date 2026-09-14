@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(feature = "desktop", not(any(target_os = "macos", windows))))]
 use tauri::{AppHandle, Manager};
 
-pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 18;
+pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 19;
 pub(crate) const MAX_STATISTICS_RETENTION_HOURS: u32 = 24 * 365;
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESOLVED_UPSTREAM_ADDRESSES: usize = 16;
@@ -148,6 +148,15 @@ pub struct AppConfig {
     pub monitoring_api_port: u16,
     #[serde(default)]
     pub monitoring_api_token: String,
+    /// Web 管理会话的空闲超时（分钟）。会话还有一个不可配置的绝对上限，见 `web_auth`。
+    /// 只影响 Linux 的 Web 管理后台，桌面版不引入登录。
+    #[serde(default = "default_web_admin_session_idle_minutes")]
+    pub web_admin_session_idle_minutes: u32,
+    /// 是否给 Web 管理会话 Cookie 加 `Secure`。默认关闭：直接用 http 访问局域网地址时
+    /// 加上它会让浏览器丢弃 Cookie，直接登不上。由反向代理终止 TLS 时手工打开——
+    /// 不去信任 `X-Forwarded-Proto`，那个头任何能连到管理端口的客户端都能伪造。
+    #[serde(default)]
+    pub web_admin_secure_cookie: bool,
     #[serde(default)]
     pub blocking_mode: BlockingMode,
     #[serde(default = "default_blocking_response_ttl")]
@@ -354,6 +363,8 @@ impl Default for AppConfig {
             monitoring_api_listen_host: default_monitoring_api_listen_host(),
             monitoring_api_port: default_monitoring_api_port(),
             monitoring_api_token: String::new(),
+            web_admin_session_idle_minutes: default_web_admin_session_idle_minutes(),
+            web_admin_secure_cookie: false,
             blocking_mode: BlockingMode::default(),
             blocking_response_ttl: default_blocking_response_ttl(),
             blocking_custom_ipv4: String::new(),
@@ -470,6 +481,9 @@ impl AppConfig {
             return Err("自恢复检查间隔必须在 10 到 3600 秒之间".into());
         }
         self.monitoring_api_socket_addr()?;
+        if !(5..=720).contains(&self.web_admin_session_idle_minutes) {
+            return Err("Web 管理会话空闲超时必须在 5 到 720 分钟之间".into());
+        }
         if self.schema_version > CURRENT_CONFIG_SCHEMA_VERSION {
             return Err(format!(
                 "配置版本 {} 高于当前支持的版本 {}",
@@ -720,6 +734,10 @@ fn default_family_blocked_services() -> String {
 
 fn default_monitoring_api_listen_host() -> String {
     "127.0.0.1".into()
+}
+
+fn default_web_admin_session_idle_minutes() -> u32 {
+    60
 }
 
 fn default_monitoring_api_port() -> u16 {

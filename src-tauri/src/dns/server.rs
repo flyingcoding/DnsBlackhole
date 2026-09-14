@@ -157,15 +157,11 @@ impl DnsServer {
         reset_stats(&stats);
         // reset_stats 会清空内存队列，这里把落盘的历史安全事件放回去，
         // 让「安全防护」页在重启后仍能显示既有记录。
-        match database.recent_security_events(super::SECURITY_EVENT_CAPACITY) {
-            Ok(mut events) => {
-                let since = super::stats::current_second()
-                    .saturating_sub(u64::from(config.security_event_retention_hours) * 3600);
-                events.retain(|event| event.last_seen_at >= since);
-                super::restore_security_events(&stats, events);
-            }
-            Err(error) => eprintln!("读取历史安全事件失败：{error}"),
-        }
+        super::security_events::restore_persisted_security_events(
+            &stats,
+            &database,
+            config.security_event_retention_hours,
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
         let security_event_writer = Some(SecurityEventWriter::start(

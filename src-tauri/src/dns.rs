@@ -39,7 +39,13 @@ pub use stats::{
     DnsStats, DnsTransport, RuntimeStatus, SecurityEvent, SecurityEventType, TrafficBucket,
     UpstreamLatencyStat, UpstreamRequestStat, empty_status,
 };
-pub(crate) use stats::{SECURITY_EVENT_CAPACITY, restore_security_events};
+pub(crate) use stats::SECURITY_EVENT_CAPACITY;
+// Web 管理认证自己落盘安全事件，只借用内存队列的聚合逻辑。
+#[cfg(any(
+    all(feature = "web-admin", target_os = "linux"),
+    all(test, feature = "web-admin")
+))]
+pub(crate) use stats::append_security_event;
 
 #[cfg(test)]
 mod tests {

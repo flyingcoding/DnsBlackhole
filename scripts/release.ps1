@@ -16,10 +16,15 @@ $packageVersion = (Get-Content "package.json" -Raw -Encoding UTF8 | ConvertFrom-
 $conf = Get-Content "src-tauri/tauri.conf.json" -Raw -Encoding UTF8 | ConvertFrom-Json
 $cargoToml = Get-Content "src-tauri/Cargo.toml" -Raw -Encoding UTF8
 $cargoLock = Get-Content "src-tauri/Cargo.lock" -Raw -Encoding UTF8
+$dotenv = Get-Content ".env" -Raw -Encoding UTF8
 $cargoTomlMatch = [regex]::Match($cargoToml, '(?ms)^\[package\]\s*.*?^version\s*=\s*"([^"]+)"')
 $cargoLockMatch = [regex]::Match($cargoLock, '(?ms)^\[\[package\]\]\s*name\s*=\s*"dnsblackhole"\s*version\s*=\s*"([^"]+)"')
+$composeMatch = [regex]::Match($dotenv, '(?m)^DNSBLACKHOLE_VERSION\s*=\s*(\S+)\s*$')
 if (-not $cargoTomlMatch.Success -or -not $cargoLockMatch.Success) {
     throw "Unable to read project version from Cargo.toml or Cargo.lock"
+}
+if (-not $composeMatch.Success) {
+    throw "Unable to read DNSBLACKHOLE_VERSION from .env"
 }
 
 $versions = [ordered]@{
@@ -27,6 +32,7 @@ $versions = [ordered]@{
     "src-tauri/tauri.conf.json" = [string]$conf.version
     "src-tauri/Cargo.toml"     = $cargoTomlMatch.Groups[1].Value
     "src-tauri/Cargo.lock"     = $cargoLockMatch.Groups[1].Value
+    ".env"                     = $composeMatch.Groups[1].Value
 }
 $uniqueVersions = @($versions.Values | Sort-Object -Unique)
 if ($uniqueVersions.Count -ne 1) {

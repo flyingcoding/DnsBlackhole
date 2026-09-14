@@ -27,6 +27,8 @@ src-tauri/target/
 
 # Docker 本地首次配置（由用户导出的真实配置不可提交）
 docker/bootstrap-config.json
+# Docker secret 使用的本地管理密码
+dnsblackhole-admin-password.txt
 
 # macOS 后台服务 sidecar 构建产物（由 scripts/build-macos-service.sh 生成）
 src-tauri/binaries/

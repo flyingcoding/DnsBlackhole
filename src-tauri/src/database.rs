@@ -161,6 +161,14 @@ struct StatDelta {
     latency_samples: u64,
 }
 
+/// Web 管理密码凭据。密码只以 Argon2id 的 PHC 字符串形式存在，不保留明文。
+#[cfg(any(all(feature = "web-admin", target_os = "linux"), test))]
+#[derive(Debug, Clone)]
+pub struct WebAdminCredential {
+    pub password_hash: String,
+    pub updated_at: u64,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
     // 文件数据库按次打开只读连接并在查询结束后关闭，避免 24×7 运行时
@@ -448,6 +456,72 @@ impl Database {
         self.statistics_retention_hours
             .store(config.statistics_retention_hours, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// 读取 Web 管理密码凭据。`None` 表示尚未设置密码。
+    #[cfg(any(all(feature = "web-admin", target_os = "linux"), test))]
+    pub fn web_admin_credential(&self) -> Result<Option<WebAdminCredential>, String> {
+        self.lock()?
+            .query_row(
+                "SELECT password_hash, updated_at FROM web_admin_credential WHERE id = 1",
+                [],
+                |row| {
+                    Ok(WebAdminCredential {
+                        password_hash: row.get(0)?,
+                        updated_at: read_u64(row, 1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| format!("读取 Web 管理凭据失败：{e}"))
+    }
+
+    /// 仅在尚未设置时创建 Web 管理密码凭据。
+    ///
+    /// 首次设置接口可能被多个浏览器同时请求，必须由数据库唯一键决定唯一胜者，
+    /// 不能依赖“先查再写”。返回 `None` 表示已有凭据，本次没有覆盖。
+    #[cfg(any(all(feature = "web-admin", target_os = "linux"), test))]
+    pub fn create_web_admin_credential(&self, password_hash: &str) -> Result<Option<u64>, String> {
+        let now = unix_now();
+        let stored = u64_to_db_i64(now, "Web 管理凭据更新时间")?;
+        let inserted = self
+            .lock()?
+            .execute(
+                "INSERT INTO web_admin_credential (id, password_hash, updated_at)
+                 VALUES (1, ?1, ?2)
+                 ON CONFLICT(id) DO NOTHING",
+                params![password_hash, stored],
+            )
+            .map_err(|e| format!("创建 Web 管理凭据失败：{e}"))?;
+        Ok((inserted > 0).then_some(now))
+    }
+
+    /// 写入 Web 管理密码哈希（PHC 字符串），返回写入时间。
+    #[cfg(any(all(feature = "web-admin", target_os = "linux"), test))]
+    pub fn save_web_admin_credential(&self, password_hash: &str) -> Result<u64, String> {
+        let now = unix_now();
+        let stored = u64_to_db_i64(now, "Web 管理凭据更新时间")?;
+        self.lock()?
+            .execute(
+                "INSERT INTO web_admin_credential (id, password_hash, updated_at)
+                 VALUES (1, ?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET
+                     password_hash = excluded.password_hash,
+                     updated_at = excluded.updated_at",
+                params![password_hash, stored],
+            )
+            .map_err(|e| format!("保存 Web 管理凭据失败：{e}"))?;
+        Ok(now)
+    }
+
+    /// 清除 Web 管理密码凭据，返回是否确实删掉了一条记录。
+    #[cfg(any(all(feature = "web-admin", target_os = "linux"), test))]
+    pub fn clear_web_admin_credential(&self) -> Result<bool, String> {
+        let removed = self
+            .lock()?
+            .execute("DELETE FROM web_admin_credential WHERE id = 1", [])
+            .map_err(|e| format!("清除 Web 管理凭据失败：{e}"))?;
+        Ok(removed > 0)
     }
 
     pub fn insert_query_events(&self, entries: &[QueryPersistenceEntry]) -> Result<(), String> {
@@ -1725,6 +1799,15 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             value TEXT NOT NULL
         ) WITHOUT ROWID;
 
+        -- Web 管理密码哈希单独存表，不放进 app_config：配置导出/导入天然不携带密码，
+        -- 也不会因为导入别处的配置而带进别人的密码。桌面版不建登录流程，但表结构保持
+        -- 无条件创建，这样同一个数据目录在 desktop 与 web-admin 构建之间可以互换。
+        CREATE TABLE IF NOT EXISTS web_admin_credential (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            password_hash TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
         -- 安全事件此前只存在内存里，重启即丢。这里落盘保存聚合后的条目：
         -- (类型, 协议, 客户端, 原因, 首次时间) 天然唯一，增量写入累加计数并更新末次时间。
         CREATE TABLE IF NOT EXISTS security_events (
@@ -2510,12 +2593,20 @@ fn security_event_type_to_db(value: SecurityEventType) -> &'static str {
     match value {
         SecurityEventType::AccessDenied => "access_denied",
         SecurityEventType::RateLimited => "rate_limited",
+        SecurityEventType::WebAuthLogin => "web_auth_login",
+        SecurityEventType::WebAuthFailed => "web_auth_failed",
+        SecurityEventType::WebAuthLocked => "web_auth_locked",
+        SecurityEventType::WebAuthPasswordChanged => "web_auth_password_changed",
     }
 }
 
 fn security_event_type_from_db(value: &str) -> SecurityEventType {
     match value {
         "rate_limited" => SecurityEventType::RateLimited,
+        "web_auth_login" => SecurityEventType::WebAuthLogin,
+        "web_auth_failed" => SecurityEventType::WebAuthFailed,
+        "web_auth_locked" => SecurityEventType::WebAuthLocked,
+        "web_auth_password_changed" => SecurityEventType::WebAuthPasswordChanged,
         _ => SecurityEventType::AccessDenied,
     }
 }
@@ -2579,6 +2670,129 @@ fn anonymize_ip(value: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn web_admin_credential_round_trip() {
+        let db = Database::open_in_memory().expect("db should open");
+        assert!(
+            db.web_admin_credential()
+                .expect("credential should read")
+                .is_none()
+        );
+        assert!(!db.clear_web_admin_credential().expect("clear should work"));
+
+        let created_at = db
+            .create_web_admin_credential("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA")
+            .expect("credential should be created")
+            .expect("first create should win");
+        assert_eq!(
+            db.create_web_admin_credential("$argon2id$v=19$m=19456,t=2,p=1$b3RoZXI$b3RoZXI")
+                .expect("duplicate create should be handled"),
+            None,
+            "首次设置不能覆盖已经存在的凭据"
+        );
+        assert_eq!(
+            db.web_admin_credential()
+                .expect("credential should read")
+                .expect("credential should exist")
+                .updated_at,
+            created_at
+        );
+        assert!(db.clear_web_admin_credential().expect("clear should work"));
+
+        let updated_at = db
+            .save_web_admin_credential("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA")
+            .expect("credential should save");
+        let stored = db
+            .web_admin_credential()
+            .expect("credential should read")
+            .expect("credential should exist");
+        assert_eq!(
+            stored.password_hash,
+            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"
+        );
+        assert_eq!(stored.updated_at, updated_at);
+
+        db.save_web_admin_credential("$argon2id$v=19$m=19456,t=2,p=1$b3RoZXI$b3RoZXI")
+            .expect("credential should overwrite");
+        assert_eq!(
+            db.web_admin_credential()
+                .expect("credential should read")
+                .expect("credential should exist")
+                .password_hash,
+            "$argon2id$v=19$m=19456,t=2,p=1$b3RoZXI$b3RoZXI",
+            "重复写入只保留一条记录"
+        );
+
+        assert!(db.clear_web_admin_credential().expect("clear should work"));
+        assert!(
+            db.web_admin_credential()
+                .expect("credential should read")
+                .is_none()
+        );
+    }
+
+    /// 密码凭据必须与 app_config 完全分离：配置导出走的是 app_config，
+    /// 分开存才能保证导出的配置里天然不含密码哈希。
+    #[test]
+    fn web_admin_credential_is_not_part_of_app_config() {
+        let db = Database::open_in_memory().expect("db should open");
+        db.save_config(&AppConfig::default())
+            .expect("config should save");
+        db.save_web_admin_credential("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA")
+            .expect("credential should save");
+        let raw: String = db
+            .lock()
+            .expect("database should lock")
+            .query_row("SELECT value FROM app_config WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("config row should exist");
+        assert!(!raw.contains("argon2id"));
+        assert!(!raw.contains("password_hash"));
+
+        let exported = db.load_config().expect("config should load").expect("config");
+        let json = serde_json::to_string(&exported).expect("config should serialize");
+        assert!(!json.contains("argon2id"));
+    }
+
+    #[test]
+    fn web_auth_security_event_types_survive_a_round_trip() {
+        let db = Database::open_in_memory().expect("db should open");
+        let types = [
+            SecurityEventType::WebAuthLogin,
+            SecurityEventType::WebAuthFailed,
+            SecurityEventType::WebAuthLocked,
+            SecurityEventType::WebAuthPasswordChanged,
+            SecurityEventType::AccessDenied,
+            SecurityEventType::RateLimited,
+        ];
+        let events = types
+            .iter()
+            .enumerate()
+            .map(|(index, event_type)| SecurityEvent {
+                event_type: *event_type,
+                protocol: DnsTransport::Tcp,
+                client_ip: format!("192.168.1.{index}"),
+                reason: format!("reason-{index}"),
+                first_seen_at: 1_700_000_000 + index as u64,
+                last_seen_at: 1_700_000_000 + index as u64,
+                count: 1,
+            })
+            .collect::<Vec<_>>();
+        db.append_security_events(&events)
+            .expect("events should persist");
+        let restored = db
+            .recent_security_events(64)
+            .expect("events should read back");
+        assert_eq!(restored.len(), types.len());
+        for event_type in types {
+            assert!(
+                restored.iter().any(|event| event.event_type == event_type),
+                "{event_type:?} 应能原样读回"
+            );
+        }
+    }
 
     fn sample_query_log(domain: &str) -> QueryLogEntry {
         QueryLogEntry {

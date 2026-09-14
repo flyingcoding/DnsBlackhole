@@ -41,8 +41,16 @@ mod performance;
 pub mod privileged_bridge;
 #[cfg(feature = "desktop")]
 mod tray;
-#[cfg(all(feature = "web-admin", target_os = "linux"))]
+#[cfg(any(
+    all(feature = "web-admin", target_os = "linux"),
+    all(test, feature = "web-admin")
+))]
 mod web_admin;
+#[cfg(any(
+    all(feature = "web-admin", target_os = "linux"),
+    all(test, feature = "web-admin")
+))]
+mod web_auth;
 
 #[cfg(feature = "desktop")]
 mod desktop {
