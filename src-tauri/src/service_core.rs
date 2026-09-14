@@ -1769,7 +1769,8 @@ mod tests {
             listen_host: "127.0.0.1".into(),
             listen_port: port,
             listen_ipv6: false,
-            use_filters: false,
+            // 使用本地规则确认恢复后的 DNS 实例可应答，避免测试依赖公网 DNS。
+            use_filters: true,
             filters: Vec::new(),
             blacklist: "||example.com^".into(),
             ..AppConfig::default()
