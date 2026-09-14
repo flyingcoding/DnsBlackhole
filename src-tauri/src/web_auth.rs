@@ -34,8 +34,8 @@ use crate::{dns::SecurityEventType, service_core::AppState};
 /// 实测记录：
 /// - amd64：**12.0 ms**（2026-09-09，Ubuntu 26.04 验证机，VMware 4 vCPU / 3.3 GiB RAM，
 ///   release 构建）。登录路径上这个开销可以忽略，限速阈值不用为它让步。
-/// - arm64 低配设备（树莓派 / ARM NAS）：**待实测**，是 v0.2.6 的验收项，
-///   与 arm64 镜像一起验。过慢时下调 `ARGON2_MEMORY_KIB` 而不是 `ARGON2_TIME_COST`——
+/// - arm64 低配设备（树莓派 / ARM NAS）：**待实测**；以后正式支持 arm64 镜像时
+///   一并验证。过慢时下调 `ARGON2_MEMORY_KIB` 而不是 `ARGON2_TIME_COST`——
 ///   减少迭代次数对离线爆破的抗性损失更大。
 const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
 const ARGON2_TIME_COST: u32 = 2;
