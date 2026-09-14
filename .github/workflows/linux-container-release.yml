@@ -168,7 +168,7 @@ jobs:
 
           printf '%s\n' "${admin_password}" > "${password_file}"
           sudo chown 10001:10001 "${password_file}"
-          chmod 0400 "${password_file}"
+          sudo chmod 0400 "${password_file}"
           docker volume create dnsblackhole-release-data >/dev/null
           docker run --detach \
             --name dnsblackhole-release-smoke \
