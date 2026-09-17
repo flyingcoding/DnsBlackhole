@@ -106,6 +106,7 @@ import {
   exportSanitizedDiagnostics,
 } from "./config-transfer";
 import { exportFilteredQueryLogs } from "./query-log-export";
+import { blocklistSourceLabel, filterIdFromSource } from "./blocklist-source";
 import { dnsQueryTypeLabel, renderQueryLogRow } from "./query-log-render";
 import {
   CLIENT_POLICY_SERVICE_KEYS,
@@ -215,6 +216,20 @@ document
 let activeView: ViewName = "dashboard";
 let filtersState: FilterSubscription[] = [];
 let editingFilterIds = new Set<string>();
+let draggingFilterId: string | null = null;
+const ROW_REORDER_MS = 160;
+const ROW_REORDER_EASING = "cubic-bezier(0.2, 0, 0, 1)";
+type FilterDragState = {
+  /** 按下时指针落在行内的相对位置，拖动全程保持不变才跟手。 */
+  pointerOffset: number;
+  /** 行当前的跟手位移，DOM 换位后要跟着修正。 */
+  translate: number;
+  /** 让位动画的结束时间，动画期间不重算插入点。 */
+  animatingUntil: number;
+};
+let filterDrag: FilterDragState | null = null;
+// 新增但还没拉过规则的清单，保存成功后自动更新这几条。
+let pendingNewFilterIds = new Set<string>();
 let currentQueryLogEnabled = true;
 let refreshInFlight = false;
 let statusRefreshQueued = false;
@@ -297,7 +312,8 @@ const QUERY_LOG_SEARCH_DEBOUNCE_MS = 800;
 const BACKGROUND_REFRESH_INTERVAL_MS = 5_000;
 const DASHBOARD_AUTO_REFRESH_INTERVAL_MS = 30_000;
 // 仪表盘只展示最有价值的前几项，避免页面和卡片同时出现滚动条。
-const RANK_ROW_LIMIT = 8;
+// 卡片高度固定在约八行，多出来的靠卡片内部滚动看；后端排行查询上限是 200 条。
+const RANK_ROW_LIMIT = 50;
 const CHECK_RETRY_DELAYS_MS = [800, 2_000, 5_000];
 const DOWNLOAD_RETRY_DELAYS_MS = [1_000, 2_500, 5_000];
 const CHECK_TIMEOUT_MS = 20_000;
@@ -604,10 +620,9 @@ const saveSettingsButton = query<HTMLButtonElement>("#save_settings_btn");
 const saveSecurityButton = query<HTMLButtonElement>("#save_security_btn");
 const saveFiltersButton = query<HTMLButtonElement>("#save_filters_btn");
 const saveCustomButton = query<HTMLButtonElement>("#save_custom_btn");
-const configChangeBar = query<HTMLElement>("#config_change_bar");
-const configChangeModules = query<HTMLElement>("#config_change_modules");
-const saveAllConfigButton = query<HTMLButtonElement>("#save_all_config_btn");
-const discardConfigButton = query<HTMLButtonElement>("#discard_config_btn");
+const discardConfigButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>(".discard-config-btn"),
+);
 const saveStateLabels = Array.from(document.querySelectorAll<HTMLElement>(".save-state-label"));
 const configSaveButtons = [
   saveButton,
@@ -615,9 +630,9 @@ const configSaveButtons = [
   saveSecurityButton,
   saveFiltersButton,
   saveCustomButton,
-  saveAllConfigButton,
 ];
-configSaveButtons.forEach((button) => {
+// 放弃更改常驻在各页标题栏，配置读出来之前一律不可点。
+[...configSaveButtons, ...discardConfigButtons].forEach((button) => {
   button.disabled = true;
 });
 const startButton = query<HTMLButtonElement>("#start_btn");
@@ -1570,14 +1585,6 @@ function handleConfigFieldChange(event: Event): void {
 app.addEventListener("input", handleConfigFieldChange);
 app.addEventListener("change", handleConfigFieldChange);
 
-configChangeModules.addEventListener("click", (event) => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-dirty-view]");
-  const view = button?.dataset.dirtyView as ConfigView | undefined;
-  if (view) {
-    setActiveView(view);
-  }
-});
-
 window.addEventListener("keydown", (event) => {
   if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") {
     return;
@@ -1613,11 +1620,7 @@ saveCustomButton.addEventListener("click", async () => {
   await saveConfig();
 });
 
-saveAllConfigButton.addEventListener("click", async () => {
-  await saveConfig();
-});
-
-discardConfigButton.addEventListener("click", async () => {
+async function discardConfigChanges(): Promise<void> {
   if (!configDirty) {
     return;
   }
@@ -1635,7 +1638,9 @@ discardConfigButton.addEventListener("click", async () => {
   if (!confirmed) {
     return;
   }
-  discardConfigButton.disabled = true;
+  discardConfigButtons.forEach((button) => {
+    button.disabled = true;
+  });
   try {
     if (await loadConfig(true)) {
       clearConfigFieldErrors();
@@ -1646,6 +1651,12 @@ discardConfigButton.addEventListener("click", async () => {
     // 交回统一状态管理，避免在没有可放弃更改时把按钮留成可点。
     updateConfigSaveState();
   }
+}
+
+discardConfigButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    void discardConfigChanges();
+  });
 });
 
 queryLogPauseButton.addEventListener("click", () => {
@@ -1672,6 +1683,7 @@ queryLogExportButton.addEventListener("click", async () => {
       (exported, total) => {
         queryLogExportButton.textContent = t("导出 {p0}/{p1}", { p0: exported.toLocaleString(), p1: total.toLocaleString() });
       },
+      currentFilterNames(),
     );
     if (!result) {
       return;
@@ -1854,18 +1866,20 @@ addFilterButton.addEventListener("click", () => {
     },
   ];
   editingFilterIds.add(id);
+  pendingNewFilterIds.add(id);
   renderFilters();
   updateConfigDirtyState();
 });
 
-updateFiltersButton.addEventListener("click", async () => {
+/** filterIds 为空即全量更新；传入时只更新这几条，其余清单保持原样。 */
+async function runFilterUpdate(filterIds?: string[]): Promise<void> {
   setFilterUpdating(true);
   startFilterUpdateProgressPolling();
   try {
     await waitForPaint();
     const submitted = collectConfig();
     const savedBeforeUpdate = savedConfigFingerprint;
-    const result = await updateFiltersCommand(submitted);
+    const result = await updateFiltersCommand(submitted, filterIds);
     if (savedConfigFingerprint === savedBeforeUpdate) {
       savedConfigFingerprint = configFingerprint(submitted);
     }
@@ -1876,10 +1890,16 @@ updateFiltersButton.addEventListener("click", async () => {
   } catch (error) {
     showMessage(String(error), true);
     await refreshStatus();
+    // 失败时不会重新载入配置，重绘一次把行内按钮的“更新中”复位。
+    renderFilters();
   } finally {
     stopFilterUpdateProgressPolling();
     setFilterUpdating(false);
   }
+}
+
+updateFiltersButton.addEventListener("click", async () => {
+  await runFilterUpdate();
 });
 
 cancelFilterUpdateButton.addEventListener("click", async () => {
@@ -2538,6 +2558,7 @@ filtersBody.addEventListener("click", (event) => {
   if (target.dataset.action === "remove") {
     filtersState = filtersState.filter((filter) => filter.id !== id);
     editingFilterIds.delete(id);
+    pendingNewFilterIds.delete(id);
     renderFilters();
     updateConfigDirtyState();
   }
@@ -2545,6 +2566,204 @@ filtersBody.addEventListener("click", (event) => {
     editingFilterIds = toggleEditing(editingFilterIds, id);
     renderFilters();
   }
+  if (target.dataset.action === "update") {
+    target.textContent = t("更新中");
+    void runFilterUpdate([id]);
+  }
+});
+
+// 列表顺序只影响展示与规则缓存指纹，不影响拦截结果，所以直接改草稿顺序即可。
+function moveFilter(id: string, delta: number): void {
+  const index = filtersState.findIndex((filter) => filter.id === id);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= filtersState.length) {
+    return;
+  }
+  const rows = filterRows();
+  const row = rows[index];
+  const reference = delta < 0 ? rows[target] : rows[target].nextElementSibling;
+  animateRowReorder(null, () => {
+    if (reference) {
+      filtersBody.insertBefore(row, reference);
+    } else {
+      filtersBody.appendChild(row);
+    }
+  });
+  const next = [...filtersState];
+  const [moved] = next.splice(index, 1);
+  next.splice(target, 0, moved);
+  filtersState = next;
+  // 不重绘，行还是原来那个节点，焦点自然留在手柄上。
+  updateConfigDirtyState();
+}
+
+function filterRows(): HTMLElement[] {
+  return Array.from(filtersBody.querySelectorAll<HTMLElement>(".filter-item"));
+}
+
+function draggedRow(): HTMLElement | null {
+  return draggingFilterId
+    ? filtersBody.querySelector<HTMLElement>(
+        `.filter-item[data-id="${CSS.escape(draggingFilterId)}"]`,
+      )
+    : null;
+}
+
+/**
+ * 指针位置应该插在哪一行之前，null 表示插到末尾。
+ *
+ * 按行的中线判定，而不是“指针落在哪一行的范围内”：后者在最后一行下方的空白处、
+ * 或两行之间的间隙上都找不到目标，表现就是拖过去了但顺序不动。
+ */
+function dropReference(clientY: number, dragged: HTMLElement): HTMLElement | null {
+  for (const row of filterRows()) {
+    if (row === dragged) {
+      continue;
+    }
+    const rect = row.getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      return row;
+    }
+  }
+  return null;
+}
+
+/**
+ * FLIP：先记下各行位置，改完 DOM 用 transform 把它们拉回原处，下一帧再放开播动画。
+ * 传 dragged 时该行不补间——它正跟着指针走，补间反而会顿；键盘移动传 null，所有行都动画。
+ */
+function animateRowReorder(dragged: HTMLElement | null, mutate: () => void): void {
+  const before = new Map(filterRows().map((row) => [row, row.getBoundingClientRect().top]));
+  mutate();
+  for (const row of filterRows()) {
+    const start = before.get(row);
+    if (start === undefined) {
+      continue;
+    }
+    const delta = start - row.getBoundingClientRect().top;
+    if (row === dragged) {
+      // 行的槽位变了，跟手位移要补上同样的差值，视觉上才不会跳一下。
+      if (filterDrag) {
+        filterDrag.translate += delta;
+        row.style.transform = `translateY(${filterDrag.translate}px)`;
+      }
+      continue;
+    }
+    if (delta === 0) {
+      continue;
+    }
+    row.style.transition = "none";
+    row.style.transform = `translateY(${delta}px)`;
+  }
+  // 读一次布局，让上面的 transform 成为动画起点而不是被合并掉。
+  void filtersBody.offsetHeight;
+  for (const row of filterRows()) {
+    if (row === dragged) {
+      continue;
+    }
+    row.style.transition = `transform ${ROW_REORDER_MS}ms ${ROW_REORDER_EASING}`;
+    row.style.transform = "";
+  }
+  if (filterDrag) {
+    filterDrag.animatingUntil = performance.now() + ROW_REORDER_MS;
+  }
+}
+
+filtersBody.addEventListener("pointerdown", (event) => {
+  const handle = (event.target as HTMLElement).closest<HTMLElement>("[data-drag-handle]");
+  const row = handle?.closest<HTMLElement>(".filter-item");
+  if (!handle || !row || event.button !== 0) {
+    return;
+  }
+  draggingFilterId = row.dataset.id ?? null;
+  filterDrag = {
+    pointerOffset: event.clientY - row.getBoundingClientRect().top,
+    translate: 0,
+    animatingUntil: 0,
+  };
+  row.classList.add("dragging");
+  row.style.transition = "none";
+  filtersBody.classList.add("is-reordering");
+  handle.setPointerCapture(event.pointerId);
+  // 阻止拖动时选中行内文字。
+  event.preventDefault();
+});
+
+filtersBody.addEventListener("pointermove", (event) => {
+  const row = draggedRow();
+  if (!row || !filterDrag) {
+    return;
+  }
+  // 跟手：按下时指针在行内哪个位置，拖动全程就保持在那个位置。
+  const naturalTop = row.getBoundingClientRect().top - filterDrag.translate;
+  filterDrag.translate = event.clientY - filterDrag.pointerOffset - naturalTop;
+  row.style.transform = `translateY(${filterDrag.translate}px)`;
+
+  // 让位动画期间量到的是中间位置，拿它算插入点会来回横跳。
+  if (performance.now() < filterDrag.animatingUntil) {
+    return;
+  }
+  const reference = dropReference(event.clientY, row);
+  if (reference === row.nextElementSibling) {
+    return;
+  }
+  animateRowReorder(row, () => {
+    if (reference) {
+      filtersBody.insertBefore(row, reference);
+    } else {
+      filtersBody.appendChild(row);
+    }
+  });
+});
+
+function finishFilterDrag(): void {
+  const row = draggedRow();
+  if (!row) {
+    return;
+  }
+  row.classList.remove("dragging");
+  filtersBody.classList.remove("is-reordering");
+  draggingFilterId = null;
+  if (filterDrag?.translate) {
+    // 松手后从跟手位置滑回槽位，而不是直接瞬移。
+    row.style.transition = `transform ${ROW_REORDER_MS}ms ${ROW_REORDER_EASING}`;
+    row.style.transform = "";
+    window.setTimeout(() => {
+      row.style.transition = "";
+    }, ROW_REORDER_MS);
+  } else {
+    row.style.transition = "";
+    row.style.transform = "";
+  }
+  filterDrag = null;
+
+  const byId = new Map(filtersState.map((filter) => [filter.id, filter]));
+  const next = filterRows()
+    .map((item) => byId.get(item.dataset.id ?? ""))
+    .filter((filter): filter is FilterSubscription => Boolean(filter));
+  if (next.length !== filtersState.length) {
+    renderFilters();
+    return;
+  }
+  const changed = next.some((filter, index) => filter.id !== filtersState[index].id);
+  filtersState = next;
+  // DOM 顺序已经是最终结果，这里重绘只会打断收尾动画。
+  if (changed) {
+    updateConfigDirtyState();
+  }
+}
+
+filtersBody.addEventListener("pointerup", finishFilterDrag);
+filtersBody.addEventListener("pointercancel", finishFilterDrag);
+
+filtersBody.addEventListener("keydown", (event) => {
+  const handle = (event.target as HTMLElement).closest<HTMLElement>("[data-drag-handle]");
+  const id = handle?.closest<HTMLElement>(".filter-item")?.dataset.id;
+  if (!id || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) {
+    return;
+  }
+  event.preventDefault();
+  moveFilter(id, event.key === "ArrowUp" ? -1 : 1);
 });
 
 async function bootstrapApplication(): Promise<void> {
@@ -2804,6 +3023,9 @@ async function loadConfig(force = false): Promise<boolean> {
     blacklistInput.value = config.blacklist;
     ruleEditor.refresh();
     filtersState = config.filters;
+    pendingNewFilterIds = new Set(
+      [...pendingNewFilterIds].filter((id) => config.filters.some((filter) => filter.id === id)),
+    );
     renderFilters();
     configLoaded = true;
     savedConfigFingerprint = configFingerprint(collectConfig());
@@ -3485,7 +3707,26 @@ async function saveConfig(): Promise<void> {
     showMessage(t("配置尚未从 DNS 服务加载，已阻止保存以保护原配置"), true);
     return;
   }
-  await runStatusAction(() => saveConfigOnly(), t("配置已保存"));
+  let saved = false;
+  // reconcileConfig 只在保存成功时回调，保存失败不该触发更新。
+  await runStatusAction(() => saveConfigOnly(), t("配置已保存"), () => {
+    saved = true;
+  });
+  if (saved) {
+    await updatePendingNewFilters();
+  }
+}
+
+/** 新增的清单保存后规则数还是 0，这里补一次更新，省得再手动点一遍。 */
+async function updatePendingNewFilters(): Promise<void> {
+  const ids = [...pendingNewFilterIds].filter((id) =>
+    filtersState.some((filter) => filter.id === id && filter.enabled && filter.url.trim()),
+  );
+  pendingNewFilterIds = new Set();
+  if (ids.length === 0) {
+    return;
+  }
+  await runFilterUpdate(ids);
 }
 
 async function saveConfigOnly(): Promise<RuntimeStatus> {
@@ -3609,10 +3850,10 @@ function updateConfigDirtyState(): void {
   if (!configLoaded) {
     return;
   }
-  // 大黑名单下指纹要序列化整份配置，按键路径上只算一次并透传给变更条。
+  // 大黑名单下指纹要序列化整份配置，按键路径上只算一次。
   const fingerprint = configFingerprint(collectConfig());
   configDirty = fingerprint !== savedConfigFingerprint;
-  updateConfigSaveState(fingerprint);
+  updateConfigSaveState();
 }
 
 function configValidationMessage(code: ConfigValidationCode): string {
@@ -3737,7 +3978,7 @@ function dirtyConfigViews(currentFingerprint: string): ConfigView[] {
   return CONFIG_VIEWS.filter((view) => dirty.has(view));
 }
 
-function updateConfigSaveState(currentFingerprint?: string): void {
+function updateConfigSaveState(): void {
   const label = !configLoaded
     ? t("配置不可用")
     : configDirty
@@ -3747,21 +3988,9 @@ function updateConfigSaveState(currentFingerprint?: string): void {
     element.textContent = label;
     element.classList.toggle("dirty", configLoaded && configDirty);
   });
-  configSaveButtons.forEach((button) => {
+  [...configSaveButtons, ...discardConfigButtons].forEach((button) => {
     button.disabled = appBusy || !configLoaded || !configDirty;
   });
-  const dirtyViews =
-    configLoaded && configDirty
-      ? dirtyConfigViews(currentFingerprint ?? configFingerprint(collectConfig()))
-      : [];
-  configChangeBar.classList.toggle("hidden", dirtyViews.length === 0);
-  setHtmlIfChanged(
-    configChangeModules,
-    dirtyViews
-      .map((view) => `<button type="button" data-dirty-view="${view}">${escapeHtml(CONFIG_VIEW_LABELS[view])}</button>`)
-      .join(""),
-  );
-  discardConfigButton.disabled = appBusy || dirtyViews.length === 0;
 }
 
 async function refreshStatus(options: RefreshOptions = {}): Promise<void> {
@@ -4159,7 +4388,9 @@ function renderDiagnosticReport(report: DnsDiagnosticReport): void {
         ]
       : null,
     report.matched_rule ? [t("命中规则"), report.matched_rule] : null,
-    report.rule_source ? [t("规则来源"), report.rule_source] : null,
+    report.rule_source
+      ? [t("规则来源"), blocklistSourceLabel(report.rule_source, currentFilterNames())]
+      : null,
     report.rule_type ? [t("规则类型"), report.rule_type] : null,
     report.allowlist_rule ? [t("被覆盖的允许规则"), report.allowlist_rule] : null,
   ].filter((entry): entry is string[] => entry !== null);
@@ -4234,6 +4465,15 @@ function renderFilters(): void {
   filtersBody.innerHTML = filtersState.map(renderFilter).join("");
 }
 
+/** 只有启用且填了网址的清单能单独更新；改网址、切开关后都要重新算一遍。 */
+function syncFilterRowUpdateButtons(): void {
+  for (const button of filtersBody.querySelectorAll<HTMLButtonElement>('[data-action="update"]')) {
+    const id = button.closest<HTMLElement>(".filter-item")?.dataset.id ?? "";
+    const filter = filtersState.find((item) => item.id === id);
+    button.disabled = !filter?.enabled || !filter.url.trim();
+  }
+}
+
 function syncFilterUpdateMetadata(updatedFilters: FilterSubscription[]): void {
   const updatedById = new Map(updatedFilters.map((filter) => [filter.id, filter]));
   let changed = false;
@@ -4279,7 +4519,7 @@ function filterUpdateMetadataKey(filter: FilterSubscription): string {
 }
 
 async function refreshFilterUpdateMetadata(): Promise<void> {
-  if (editingFilterIds.size > 0) {
+  if (editingFilterIds.size > 0 || draggingFilterId) {
     return;
   }
   try {
@@ -4314,6 +4554,17 @@ function renderFilter(filter: FilterSubscription): string {
   return `
     <div class="filter-item" data-id="${escapeHtml(filter.id)}" role="rowgroup">
       <div class="filter-summary" role="row">
+        <span class="filter-drag" role="cell">
+          <button
+            class="filter-drag-handle"
+            data-drag-handle
+            type="button"
+            title="${t("拖动调整顺序，或用上下方向键移动")}"
+            aria-label="${t("调整黑名单 {p0} 的顺序", { p0: escapeHtml(accessibleName) })}"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h14M5 15h14"></path></svg>
+          </button>
+        </span>
         <label class="switch" title="${t("启用清单")}" role="cell">
           <input class="filter-enabled" data-field="enabled" type="checkbox" aria-label="${t("启用黑名单 {p0}", { p0: escapeHtml(accessibleName) })}" ${filter.enabled ? "checked" : ""} />
         </label>
@@ -4325,6 +4576,9 @@ function renderFilter(filter: FilterSubscription): string {
         <span class="update-time" role="cell">${formatTime(filter.last_updated)}</span>
         <span class="state-tag ${statusClass}" role="cell" title="${escapeHtml(filter.last_error ?? "")}">${statusText}</span>
         <div class="row-actions" role="cell">
+          <button data-action="update" type="button" ${
+            filter.enabled && filter.url.trim() ? "" : "disabled"
+          } aria-label="${t("更新黑名单 {p0}", { p0: escapeHtml(accessibleName) })}">${t("更新")}</button>
           <button data-action="edit" type="button" aria-label="${isEditing ? t("收起黑名单 {p0}", { p0: escapeHtml(accessibleName) }) : t("编辑黑名单 {p0}", { p0: escapeHtml(accessibleName) })}">${isEditing ? t("收起") : t("编辑")}</button>
           <button data-action="remove" type="button" aria-label="${t("删除黑名单 {p0}", { p0: escapeHtml(accessibleName) })}">${t("删除")}</button>
         </div>
@@ -4398,7 +4652,11 @@ function renderStatus(status: RuntimeStatus, options: RenderStatusOptions = {}):
   renderRankTable("#query_rank", status.stats.query_domains ?? {}, status.stats.queries, undefined, "queries");
   renderRankTable("#blocked_rank", status.stats.blocked_domains ?? {}, status.stats.blocked, undefined, "blocked");
   renderClientOverview(status.stats.client_requests ?? {}, status.stats.client_blocked ?? {});
-  renderRankTable("#blocklist_rank", status.stats.blocklist_hits ?? {}, status.stats.blocked);
+  renderRankTable(
+    "#blocklist_rank",
+    knownBlocklistHits(status.stats.blocklist_hits ?? {}),
+    status.stats.blocked,
+  );
   renderUpstreamRequestRank(
     "#upstream_rank",
     status.stats.upstream_requests ?? [],
@@ -4590,7 +4848,13 @@ function renderQueryLogs(page: QueryLogPage): void {
   }
 
   const html = page.records
-    .map((record) => renderQueryLogRow(record, { clientDisplayName, formatClientLabel }))
+    .map((record) =>
+      renderQueryLogRow(record, {
+        clientDisplayName,
+        formatClientLabel,
+        filterNames: currentFilterNames(),
+      }),
+    )
     .join("");
   setHtmlIfChanged(queryLogBody, html);
 }
@@ -5451,6 +5715,7 @@ function updateFilterField(id: string, target: HTMLInputElement): void {
     }
     return filter;
   });
+  syncFilterRowUpdateButtons();
   updateConfigDirtyState();
 }
 
@@ -5600,6 +5865,34 @@ async function runProtectionAction(
   } finally {
     setBusy(false);
   }
+}
+
+/** 清单 ID → 当前名称。来源标记里只有 ID，展示前都要过这张表。 */
+function currentFilterNames(): Map<string, string> {
+  return new Map(filtersState.map((filter) => [filter.id, filter.name]));
+}
+
+/**
+ * 把黑名单排行的来源标记换成当前清单名。
+ *
+ * 统计按清单 ID 落库，所以改名后历史会自动跟到新名下。顺带滤掉不属于"黑名单"的
+ * 来源：内置防护（DNS Rebinding Protection）、自定义规则，以及已经删掉的清单。
+ * 配置还没读出来时原样返回，免得首屏闪一下空表。
+ */
+function knownBlocklistHits(hits: Record<string, number>): Record<string, number> {
+  if (!configLoaded) {
+    return hits;
+  }
+  const names = currentFilterNames();
+  const labelled: Record<string, number> = {};
+  for (const [source, count] of Object.entries(hits)) {
+    const id = filterIdFromSource(source);
+    const name = id === null ? undefined : names.get(id);
+    if (name) {
+      labelled[name] = (labelled[name] ?? 0) + count;
+    }
+  }
+  return labelled;
 }
 
 function renderRankTable(
@@ -5856,6 +6149,9 @@ function setFilterUpdating(updating: boolean): void {
     "input, button",
   )) {
     control.disabled = updating;
+  }
+  if (!updating) {
+    syncFilterRowUpdateButtons();
   }
   cancelFilterUpdateButton.classList.toggle("hidden", !updating);
   cancelFilterUpdateButton.disabled = !updating;

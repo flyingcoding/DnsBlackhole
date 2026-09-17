@@ -1,3 +1,4 @@
+import { blocklistSourceLabel } from "./blocklist-source";
 import { escapeHtml, formatCount, formatElapsedMs, formatLogDate, formatLogTime } from "./format";
 import type { QueryLogRecord } from "./types";
 import { t } from "./i18n";
@@ -5,6 +6,8 @@ import { t } from "./i18n";
 type QueryLogRenderOptions = {
   clientDisplayName: (ip: string | null) => string | null;
   formatClientLabel: (ip: string | null) => string;
+  /** 清单 ID → 当前名称，用来把来源标记还原成人能看懂的名字。 */
+  filterNames: ReadonlyMap<string, string>;
 };
 
 export function renderQueryLogRow(
@@ -13,7 +16,7 @@ export function renderQueryLogRow(
 ): string {
   const status = queryLogStatus(record);
   const rowClass = record.failed ? " failed" : record.blocked ? " blocked" : "";
-  const detail = escapeHtml(queryLogResponseDetail(record));
+  const detail = escapeHtml(queryLogResponseDetail(record, options.filterNames));
   const measuredDuration = record.processing_duration_ms ?? record.upstream_duration_ms;
   const duration = measuredDuration !== null ? formatElapsedMs(measuredDuration) : "";
   const requestMeta = [
@@ -24,7 +27,11 @@ export function renderQueryLogRow(
     requestMeta.push(dnsQueryClassLabel(record.query_class));
   }
   const requestDetailPopover = renderQueryLogRequestDetail(record, options.formatClientLabel);
-  const responseDetailPopover = renderQueryLogResponseDetail(record, status.label);
+  const responseDetailPopover = renderQueryLogResponseDetail(
+    record,
+    status.label,
+    options.filterNames,
+  );
 
   return `
     <div class="query-log-row${rowClass}" role="row">
@@ -122,7 +129,11 @@ function renderQueryLogRequestDetail(
   ]);
 }
 
-function renderQueryLogResponseDetail(record: QueryLogRecord, statusLabel: string): string {
+function renderQueryLogResponseDetail(
+  record: QueryLogRecord,
+  statusLabel: string,
+  filterNames: ReadonlyMap<string, string>,
+): string {
   const rows = [
     [t("状态"), statusLabel],
     [t("响应来源"), queryLogResponseSourceLabel(record)],
@@ -154,7 +165,12 @@ function renderQueryLogResponseDetail(record: QueryLogRecord, statusLabel: strin
   if (record.blocked) {
     rows.push(
       [t("命中规则"), record.matched_rule ?? t("旧日志未记录")],
-      [t("来源清单"), record.rule_source ?? t("旧日志未记录")],
+      [
+        t("来源清单"),
+        record.rule_source
+          ? blocklistSourceLabel(record.rule_source, filterNames)
+          : t("旧日志未记录"),
+      ],
       [t("规则类型"), record.rule_type ?? t("旧日志未记录")],
       [t("important 覆盖"), record.important_overrode ? t("是") : t("否")],
       ["allowlist", record.allowlist_rule ?? t("无")],
@@ -260,14 +276,17 @@ function queryLogResponseSourceLabel(record: QueryLogRecord): string {
   }
 }
 
-function queryLogResponseDetail(record: QueryLogRecord): string {
+function queryLogResponseDetail(
+  record: QueryLogRecord,
+  filterNames: ReadonlyMap<string, string>,
+): string {
   if (record.failed && record.error) return record.error;
   switch (queryLogResponseSource(record)) {
     case "upstream":
       return record.upstream_server ? t("上游：{p0}", { p0: record.upstream_server }) : t("上游 DNS 解析");
     case "cache": return t("DNS 缓存命中");
     case "rewrite": return t("本地 DNS 重写");
-    case "blocked": return record.rule_source ? t("过滤器：{p0}", { p0: record.rule_source }) : t("过滤器拦截");
+    case "blocked": return record.rule_source ? t("过滤器：{p0}", { p0: blocklistSourceLabel(record.rule_source, filterNames) }) : t("过滤器拦截");
     case "refused": return record.error ?? t("本地拒绝响应");
     case "local_reverse": return t("私有地址反查，未向上游转发");
     default: return t("本地响应（旧日志）");

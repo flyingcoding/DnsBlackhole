@@ -1,4 +1,5 @@
 import { exportQueryLogFile, getQueryLogs, isTauriRuntime } from "./api";
+import { blocklistSourceLabel } from "./blocklist-source";
 import { downloadBrowserFile } from "./browser-file";
 import type { QueryLogPage, QueryLogQuery, QueryLogRecord } from "./types";
 import { t } from "./i18n";
@@ -27,6 +28,7 @@ export type CollectedQueryLogExport = QueryLogExportResult & {
 export async function exportFilteredQueryLogs(
   query: QueryLogQuery,
   onProgress?: (exported: number, total: number) => void,
+  filterNames: ReadonlyMap<string, string> = new Map(),
 ): Promise<QueryLogExportResult | null> {
   let path: string | null = null;
   if (isTauriRuntime()) {
@@ -42,7 +44,7 @@ export async function exportFilteredQueryLogs(
   }
 
   const collected = await collectQueryLogExportRecords(query, getQueryLogs, onProgress);
-  const content = serializeQueryLogsCsv(collected.records);
+  const content = serializeQueryLogsCsv(collected.records, filterNames);
   if (path) {
     await exportQueryLogFile(path, content);
   } else {
@@ -90,7 +92,10 @@ export async function collectQueryLogExportRecords(
   };
 }
 
-export function serializeQueryLogsCsv(records: QueryLogRecord[]): string {
+export function serializeQueryLogsCsv(
+  records: QueryLogRecord[],
+  filterNames: ReadonlyMap<string, string> = new Map(),
+): string {
   const header = [
     t("时间"),
     t("域名"),
@@ -122,7 +127,7 @@ export function serializeQueryLogsCsv(records: QueryLogRecord[]): string {
     record.response?.code ?? "",
     record.response?.answers.map((answer) => `${answer.record_type} ${answer.value}`).join(" | ") ?? "",
     record.matched_rule ?? "",
-    record.rule_source ?? "",
+    record.rule_source ? blocklistSourceLabel(record.rule_source, filterNames) : "",
     record.error ?? "",
   ]);
   return `\uFEFF${[header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;

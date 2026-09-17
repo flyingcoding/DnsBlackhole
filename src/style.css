@@ -939,53 +939,6 @@ button.refreshing:disabled {
   padding: 24px var(--layout-gutter) 36px;
 }
 
-.config-change-bar {
-  position: sticky;
-  top: 0;
-  z-index: 12;
-  display: flex;
-  width: 100%;
-  max-width: var(--layout-max-width);
-  min-height: 52px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  margin: -10px auto 14px;
-  border: 1px solid var(--warn-3);
-  border-radius: 8px;
-  padding: 8px 12px 8px 16px;
-  background: var(--warn-0);
-  box-shadow: 0 5px 16px rgb(var(--neutral-rgb-2) / 0.12);
-}
-
-.config-change-bar > div:first-child {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 7px 10px;
-}
-
-.config-change-bar strong {
-  color: var(--warn-15);
-  font-size: 13px;
-}
-
-#config_change_modules {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-#config_change_modules button {
-  min-height: 27px;
-  border-color: var(--warn-3);
-  padding: 3px 8px;
-  color: var(--warn-15);
-  background: transparent;
-  font-size: 11.5px;
-}
-
 .view {
   display: none;
   width: 100%;
@@ -1428,8 +1381,14 @@ button.refreshing:disabled {
 
 .rank-body {
   min-height: 260px;
+  /* 约八行，再多就在卡片内部滚动，免得排行一长把整页撑得很高。 */
+  max-height: 420px;
   overflow-x: hidden;
-  overflow-y: visible;
+  overflow-y: auto;
+  /* 预留滚动条宽度，有无滚动条的两张卡片列宽才一致。 */
+  scrollbar-gutter: stable;
+  /* 滚动停下来时对齐到整行，否则首尾会各露半行，看起来像文字被裁掉一截。 */
+  scroll-snap-type: y proximity;
   background: var(--neutral-0);
 }
 
@@ -1440,6 +1399,7 @@ button.refreshing:disabled {
 .rank-row {
   min-height: 52px;
   border-top: 1px solid var(--neutral-1);
+  scroll-snap-align: start;
   transition: background-color 0.12s ease;
 }
 
@@ -1470,6 +1430,9 @@ button.refreshing:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* line-height: normal 下行盒正好等于字体高度，半行距为 0，
+     overflow: hidden 会把 g/y 这类字母的下伸笔画削掉一截。留出余量。 */
+  line-height: 1.5;
 }
 
 .rank-domain-button {
@@ -3337,13 +3300,11 @@ select:focus {
 }
 
 @media (max-width: 900px) {
-  .config-change-bar,
   .client-policy-actions {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .config-change-bar .button-group,
   .client-policy-actions .button-group {
     justify-content: flex-end;
   }
@@ -3509,7 +3470,7 @@ select:focus {
 @media (max-width: 1199px) {
   .query-log-head,
   .query-log-row {
-    grid-template-columns: 112px minmax(250px, 1.3fr) minmax(190px, 0.9fr) 142px;
+    grid-template-columns: 112px minmax(220px, 1fr) minmax(240px, 1.25fr) 142px;
   }
 
   .query-log-head span,
@@ -3955,7 +3916,7 @@ select:focus {
 .filters-head,
 .filter-summary {
   display: grid;
-  grid-template-columns: 54px minmax(260px, 1fr) 82px 108px 88px 132px;
+  grid-template-columns: 26px 54px minmax(200px, 1fr) 82px 104px 88px 172px;
   gap: 12px;
   align-items: center;
 }
@@ -3975,6 +3936,70 @@ select:focus {
 .filter-summary {
   min-height: 62px;
   padding: 10px 12px;
+}
+
+.filter-drag {
+  display: flex;
+  justify-content: center;
+}
+
+.filter-drag-handle {
+  display: flex;
+  width: 24px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  color: var(--neutral-18);
+  background: transparent;
+  cursor: grab;
+  /* 触摸设备上要自己接管纵向手势，否则 pointermove 会被滚动吞掉。 */
+  touch-action: none;
+}
+
+.filter-drag-handle:hover:not(:disabled) {
+  color: var(--neutral-27);
+  background: var(--neutral-1);
+}
+
+.filter-drag-handle:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.filter-drag-handle svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.filters-body.is-reordering {
+  user-select: none;
+}
+
+.filter-item.dragging {
+  position: relative;
+  z-index: 2;
+  border-top-color: transparent;
+  border-radius: 8px;
+  background: var(--neutral-0);
+  box-shadow: 0 10px 26px rgb(var(--neutral-rgb-2) / 0.2);
+  /* 位移全程由 JS 写 transform，提前提级避免拖动掉帧。 */
+  will-change: transform;
+}
+
+/* 拖起来的那一行悬在上层，底下的行不该再响应 hover。 */
+.filters-body.is-reordering .filter-item:not(.dragging) {
+  pointer-events: none;
+}
+
+.filter-item.dragging .filter-drag-handle {
+  cursor: grabbing;
 }
 
 .filter-meta {
@@ -4109,7 +4134,7 @@ select:focus {
   .filters-head,
   .filter-summary,
   .filter-edit {
-    min-width: 784px;
+    min-width: 800px;
   }
 }
 
@@ -4125,6 +4150,7 @@ select:focus {
 
   .rank-body {
     min-height: 200px;
+    max-height: 280px;
   }
 
   .diagnostic-results {

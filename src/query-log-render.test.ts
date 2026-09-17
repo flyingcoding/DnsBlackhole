@@ -31,7 +31,7 @@ describe("query log renderer", () => {
 
     const html = renderQueryLogRow(record, {
       clientDisplayName: () => "<script>bad()</script>",
-      formatClientLabel: () => "client",
+      formatClientLabel: () => "client", filterNames: new Map(),
     });
     expect(html).not.toContain("<img src=x");
     expect(html).not.toContain("<script>bad()");
@@ -54,7 +54,7 @@ describe("query log renderer", () => {
 
     const anonymous = renderQueryLogRow(base, {
       clientDisplayName: () => null,
-      formatClientLabel: () => "client",
+      formatClientLabel: () => "client", filterNames: new Map(),
     });
     const occurrences = anonymous.split("192.168.32.176").length - 1;
     expect(occurrences).toBe(1);
@@ -63,7 +63,7 @@ describe("query log renderer", () => {
     // 有名称映射时才补上 IP 副行
     const named = renderQueryLogRow(base, {
       clientDisplayName: () => "小米路由器",
-      formatClientLabel: () => "client",
+      formatClientLabel: () => "client", filterNames: new Map(),
     });
     expect(named).toContain("<strong>小米路由器</strong>");
     expect(named).toContain("<span>192.168.32.176</span>");
@@ -71,14 +71,14 @@ describe("query log renderer", () => {
     // 名称与 IP 相同时不重复渲染
     const echoed = renderQueryLogRow(base, {
       clientDisplayName: () => "192.168.32.176",
-      formatClientLabel: () => "client",
+      formatClientLabel: () => "client", filterNames: new Map(),
     });
     expect(echoed.split("192.168.32.176").length - 1).toBe(1);
 
     // 无客户端 IP 时回落到未知客户端文案
     const unknown = renderQueryLogRow({ ...base, client_ip: null }, {
       clientDisplayName: () => null,
-      formatClientLabel: () => "client",
+      formatClientLabel: () => "client", filterNames: new Map(),
     });
     expect(unknown).toContain("未知客户端");
   });
@@ -102,7 +102,7 @@ describe("query log renderer", () => {
         error: "已拒绝 ANY 查询", matched_rule: null, rule_source: null,
         rule_type: null, important_overrode: false, allowlist_rule: null,
       };
-      const html = renderEnglish(record, { clientDisplayName: () => null, formatClientLabel: () => "client" });
+      const html = renderEnglish(record, { clientDisplayName: () => null, formatClientLabel: () => "client" , filterNames: new Map()});
       expect(html).toContain('class="refused"');
       expect(html).toContain("Refused");
       expect(html).not.toContain('class="processed"');

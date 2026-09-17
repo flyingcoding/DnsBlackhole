@@ -70,7 +70,7 @@ const WEB_ROUTES: Record<string, WebRoute> = {
   update_filters: {
     method: "POST",
     path: "/api/v1/admin/filters/update",
-    body: (args) => args.config,
+    body: (args) => ({ config: args.config, filter_ids: args.filterIds ?? null }),
   },
   get_filter_update_progress: { method: "GET", path: "/api/v1/admin/filters/progress" },
   cancel_filter_update: { method: "POST", path: "/api/v1/admin/filters/cancel" },
@@ -347,8 +347,12 @@ export function clearSecurityEvents(): Promise<RuntimeStatus> {
   return timedInvoke<RuntimeStatus>("clear_security_events");
 }
 
-export function updateFilters(config: AppConfig): Promise<FilterUpdateResult> {
-  return timedInvoke<FilterUpdateResult>("update_filters", { config });
+/** filterIds 为空表示更新全部启用的清单，传入后只更新列表里选定的那几条。 */
+export function updateFilters(
+  config: AppConfig,
+  filterIds?: string[],
+): Promise<FilterUpdateResult> {
+  return timedInvoke<FilterUpdateResult>("update_filters", { config, filterIds });
 }
 
 export function getFilterUpdateProgress(): Promise<FilterUpdateProgress> {

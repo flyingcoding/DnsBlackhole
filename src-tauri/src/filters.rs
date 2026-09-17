@@ -92,6 +92,27 @@ where
     )
 }
 
+/// 只更新指定 id 的远程清单，供列表里的单条更新使用。
+pub fn update_selected_filters<P>(
+    data_dir: &Path,
+    config: &mut AppConfig,
+    ids: &[String],
+    cancelled: &AtomicBool,
+    on_progress: P,
+) -> Result<FilterUpdateReport, String>
+where
+    P: FnMut(FilterUpdateProgress),
+{
+    update_matching_filters(
+        data_dir,
+        config,
+        "没有需要更新的远程清单",
+        |filter| ids.iter().any(|id| id == &filter.id),
+        cancelled,
+        on_progress,
+    )
+}
+
 pub fn has_due_filters(config: &AppConfig, now: u64) -> bool {
     let interval_seconds = u64::from(config.filter_update_interval_hours) * 3600;
     config
@@ -104,6 +125,25 @@ fn is_filter_due(filter: &FilterSubscription, now: u64, interval_seconds: u64) -
     filter
         .last_updated
         .is_none_or(|updated| now.saturating_sub(updated) >= interval_seconds)
+}
+
+/// 未启用的清单永远不下载，其余由 should_update 决定；单条更新靠它只挑中选定的那条。
+fn collect_download_jobs<F>(config: &AppConfig, should_update: F) -> Vec<FilterDownloadJob>
+where
+    F: Fn(&FilterSubscription) -> bool,
+{
+    config
+        .filters
+        .iter()
+        .enumerate()
+        .filter(|(_, filter)| filter.enabled && should_update(filter))
+        .map(|(config_index, filter)| FilterDownloadJob {
+            config_index,
+            id: filter.id.clone(),
+            name: filter.name.clone(),
+            url: filter.url.clone(),
+        })
+        .collect()
 }
 
 fn update_matching_filters<F, P>(
@@ -119,18 +159,7 @@ where
     P: FnMut(FilterUpdateProgress),
 {
     let client = build_download_client(config)?;
-    let jobs = config
-        .filters
-        .iter()
-        .enumerate()
-        .filter(|(_, filter)| filter.enabled && should_update(filter))
-        .map(|(config_index, filter)| FilterDownloadJob {
-            config_index,
-            id: filter.id.clone(),
-            name: filter.name.clone(),
-            url: filter.url.clone(),
-        })
-        .collect::<Vec<_>>();
+    let jobs = collect_download_jobs(config, should_update);
     let total = jobs.len();
     let mut updated = 0;
     let mut failed = 0;
@@ -369,8 +398,63 @@ fn unix_now() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bytes_to_mb_ceil, has_due_filters, is_allowed_filter_content_type, is_filter_due};
+    use super::{
+        bytes_to_mb_ceil, collect_download_jobs, has_due_filters, is_allowed_filter_content_type,
+        is_filter_due,
+    };
     use crate::config::{AppConfig, FilterSubscription};
+
+    fn filter_with(id: &str, enabled: bool) -> FilterSubscription {
+        FilterSubscription {
+            id: id.to_string(),
+            name: id.to_string(),
+            url: format!("https://example.invalid/{id}.txt"),
+            enabled,
+            ..FilterSubscription::default()
+        }
+    }
+
+    #[test]
+    fn selected_update_only_downloads_chosen_enabled_filters() {
+        let config = AppConfig {
+            filters: vec![
+                filter_with("a", true),
+                filter_with("b", true),
+                filter_with("c", false),
+            ],
+            ..AppConfig::default()
+        };
+        let chosen = ["b".to_string(), "c".to_string()];
+
+        let jobs = collect_download_jobs(&config, |filter| {
+            chosen.iter().any(|id| id == &filter.id)
+        });
+
+        // 选中但未启用的 c 不下载，没选中的 a 也不动。
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "b");
+        // config_index 必须是原数组下标，回写结果才不会串行。
+        assert_eq!(jobs[0].config_index, 1);
+    }
+
+    #[test]
+    fn full_update_downloads_every_enabled_filter() {
+        let config = AppConfig {
+            filters: vec![
+                filter_with("a", true),
+                filter_with("b", false),
+                filter_with("c", true),
+            ],
+            ..AppConfig::default()
+        };
+
+        let jobs = collect_download_jobs(&config, |_| true);
+
+        assert_eq!(
+            jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "c"],
+        );
+    }
 
     #[test]
     fn allows_plain_filter_content_types() {

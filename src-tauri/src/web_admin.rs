@@ -597,10 +597,10 @@ async fn export_diagnostic_report(
 async fn update_filters(
     State(state): State<WebState>,
     headers: HeaderMap,
-    Json(config): Json<Value>,
+    Json(params): Json<Value>,
 ) -> ApiResult<Response> {
     state.request_security.validate(&headers, true)?;
-    dispatch(&state, "update_filters", json!({ "config": config })).await
+    dispatch(&state, "update_filters", params).await
 }
 
 async fn pause_protection(

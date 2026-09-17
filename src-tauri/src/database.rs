@@ -132,6 +132,7 @@ const HOURLY_STATISTICS_INITIALIZED_KEY: &str = "hourly_statistics_initialized_v
 const LIFETIME_STATISTICS_INITIALIZED_KEY: &str = "lifetime_statistics_initialized_v1";
 const CLIENT_BLOCKED_STATISTICS_INITIALIZED_KEY: &str = "client_blocked_statistics_v1";
 const QUERY_LOG_SEARCH_INITIALIZED_KEY: &str = "query_log_search_initialized_v1";
+const BLOCKLIST_SOURCE_ID_KEY: &str = "blocklist_source_id_v1";
 /// 结构迁移把旧页留在 freelist 时打上此标记，启动流程随后显式压缩一次。
 /// 压缩成功才清除，压缩失败或中途退出都会在下次启动重试。
 const PENDING_COMPACTION_KEY: &str = "pending_storage_compaction_v1";
@@ -2046,10 +2047,107 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     initialize_hourly_statistics(conn)?;
     initialize_lifetime_statistics(conn)?;
     initialize_client_blocked_statistics(conn)?;
+    migrate_blocklist_source_to_id(conn)?;
     initialize_query_log_search(conn, query_log_search_existed)?;
     if dropped_legacy_search {
         mark_pending_compaction(conn)?;
     }
+    Ok(())
+}
+
+/// 把统计与查询日志里按清单名记录的来源改写成清单 ID 标记。
+///
+/// v0.2.7 之前来源存的是清单名，改名等于换了统计对象，历史会断成两段。改用 ID 之后
+/// 需要把存量数据接上：按当前配置的「名称 → ID」对应关系回填一次。
+///
+/// 升级前就改过名、库里留下的旧名匹配不到任何清单，只能原样留着——它已经无从判断
+/// 属于哪个清单了；这类记录不在排行里显示，也不影响其它数据。
+fn migrate_blocklist_source_to_id(conn: &Connection) -> Result<(), String> {
+    if database_meta_key_exists(conn, BLOCKLIST_SOURCE_ID_KEY, "检查清单来源迁移状态")? {
+        return Ok(());
+    }
+
+    let raw: Option<String> = conn
+        .query_row("SELECT value FROM app_config WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|e| format!("读取配置以迁移清单来源失败：{e}"))?;
+
+    if let Some(raw) = raw {
+        let config: AppConfig = serde_json::from_str(&raw)
+            .map_err(|e| format!("解析配置以迁移清单来源失败：{e}"))?;
+        for filter in &config.filters {
+            let tag = config::filter_source_tag(&filter.id);
+            if filter.name.is_empty() || filter.name == tag {
+                continue;
+            }
+            // 统计表以 value 为主键的一部分，理论上不会撞车，但按合并写更稳妥。
+            conn.execute(
+                "INSERT INTO statistics_hourly (
+                     hour, dimension, value, queries, blocked, forwarded, failed,
+                     requests, latency_total_ms, latency_samples
+                 )
+                 SELECT hour, dimension, ?2, queries, blocked, forwarded, failed,
+                        requests, latency_total_ms, latency_samples
+                 FROM statistics_hourly
+                 WHERE dimension = 'blocklist' AND value = ?1
+                 ON CONFLICT(hour, dimension, value) DO UPDATE SET
+                     queries = queries + excluded.queries,
+                     blocked = blocked + excluded.blocked,
+                     forwarded = forwarded + excluded.forwarded,
+                     failed = failed + excluded.failed,
+                     requests = requests + excluded.requests,
+                     latency_total_ms = latency_total_ms + excluded.latency_total_ms,
+                     latency_samples = latency_samples + excluded.latency_samples",
+                params![filter.name, tag],
+            )
+            .map_err(|e| format!("迁移清单小时统计失败：{e}"))?;
+            conn.execute(
+                "DELETE FROM statistics_hourly WHERE dimension = 'blocklist' AND value = ?1",
+                params![filter.name],
+            )
+            .map_err(|e| format!("清理清单旧名小时统计失败：{e}"))?;
+            conn.execute(
+                "INSERT INTO dashboard_summary_stats (
+                     scope, dimension, value, queries, blocked, forwarded, failed,
+                     requests, latency_total_ms, latency_samples, first_seen_at, last_seen_at
+                 )
+                 SELECT scope, dimension, ?2, queries, blocked, forwarded, failed,
+                        requests, latency_total_ms, latency_samples, first_seen_at, last_seen_at
+                 FROM dashboard_summary_stats
+                 WHERE dimension = 'blocklist' AND value = ?1
+                 ON CONFLICT(scope, dimension, value) DO UPDATE SET
+                     queries = queries + excluded.queries,
+                     blocked = blocked + excluded.blocked,
+                     forwarded = forwarded + excluded.forwarded,
+                     failed = failed + excluded.failed,
+                     requests = requests + excluded.requests,
+                     latency_total_ms = latency_total_ms + excluded.latency_total_ms,
+                     latency_samples = latency_samples + excluded.latency_samples,
+                     first_seen_at = min(first_seen_at, excluded.first_seen_at),
+                     last_seen_at = max(last_seen_at, excluded.last_seen_at)",
+                params![filter.name, tag],
+            )
+            .map_err(|e| format!("迁移清单累计统计失败：{e}"))?;
+            conn.execute(
+                "DELETE FROM dashboard_summary_stats WHERE dimension = 'blocklist' AND value = ?1",
+                params![filter.name],
+            )
+            .map_err(|e| format!("清理清单旧名累计统计失败：{e}"))?;
+            conn.execute(
+                "UPDATE query_logs SET rule_source = ?2 WHERE rule_source = ?1",
+                params![filter.name, tag],
+            )
+            .map_err(|e| format!("迁移查询日志清单来源失败：{e}"))?;
+        }
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO database_meta (key, value) VALUES (?1, '1')",
+        params![BLOCKLIST_SOURCE_ID_KEY],
+    )
+    .map_err(|e| format!("保存清单来源迁移状态失败：{e}"))?;
     Ok(())
 }
 
@@ -3061,6 +3159,103 @@ mod tests {
         assert_eq!(stats.forwarded, 30_000);
         assert!(stats_elapsed < Duration::from_secs(2));
         eprintln!("dashboard statistics: {stats_elapsed:.2?}");
+    }
+
+    #[test]
+    fn migrates_blocklist_source_from_name_to_filter_id() {
+        let db = Database::open_in_memory().expect("db should open");
+        let config = AppConfig {
+            filters: vec![crate::config::FilterSubscription {
+                id: "hagezi-tif".into(),
+                name: "HaGeZi TIF｜恶意威胁".into(),
+                url: "https://example.invalid/tif.txt".into(),
+                enabled: true,
+                ..Default::default()
+            }],
+            ..AppConfig::default()
+        };
+        db.save_config(&config).expect("config should save");
+
+        let conn = db.lock().expect("db should lock");
+        // 造出 v0.2.6 的样子：统计与日志都按清单名记录。
+        conn.execute(
+            "INSERT INTO statistics_hourly (hour, dimension, value, blocked)
+             VALUES (1, 'blocklist', 'HaGeZi TIF｜恶意威胁', 7),
+                    (1, 'blocklist', '自定义规则', 3)",
+            [],
+        )
+        .expect("hourly rows should insert");
+        conn.execute(
+            "INSERT INTO dashboard_summary_stats
+                 (scope, dimension, value, blocked, first_seen_at, last_seen_at)
+             VALUES ('all', 'blocklist', 'HaGeZi TIF｜恶意威胁', 7, 100, 200)",
+            [],
+        )
+        .expect("summary row should insert");
+        conn.execute(
+            "INSERT INTO query_logs (timestamp, domain, blocked, rule_source)
+             VALUES (1, 'a.example', 1, 'HaGeZi TIF｜恶意威胁'),
+                    (2, 'b.example', 1, '自定义规则')",
+            [],
+        )
+        .expect("log rows should insert");
+        // 开库时迁移已经跑过一次（那会儿还没有配置），这里清掉标记重来。
+        conn.execute(
+            "DELETE FROM database_meta WHERE key = ?1",
+            params![BLOCKLIST_SOURCE_ID_KEY],
+        )
+        .expect("marker should clear");
+
+        migrate_blocklist_source_to_id(&conn).expect("migration should run");
+
+        let hourly: String = conn
+            .query_row(
+                "SELECT value FROM statistics_hourly WHERE dimension='blocklist' AND blocked = 7",
+                [],
+                |row| row.get(0),
+            )
+            .expect("hourly row should exist");
+        let summary: String = conn
+            .query_row(
+                "SELECT value FROM dashboard_summary_stats WHERE dimension='blocklist'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("summary row should exist");
+        let log: String = conn
+            .query_row(
+                "SELECT rule_source FROM query_logs WHERE domain = 'a.example'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("log row should exist");
+        // 清单按 ID 关联，改名不会再把历史切成两段。
+        assert_eq!(hourly, "f:hagezi-tif");
+        assert_eq!(summary, "f:hagezi-tif");
+        assert_eq!(log, "f:hagezi-tif");
+
+        // 内置来源没有清单 ID，保持原样。
+        let builtin: String = conn
+            .query_row(
+                "SELECT rule_source FROM query_logs WHERE domain = 'b.example'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("builtin log row should exist");
+        assert_eq!(builtin, "自定义规则");
+        let builtin_hourly: i64 = conn
+            .query_row(
+                "SELECT blocked FROM statistics_hourly WHERE value = '自定义规则'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("builtin hourly row should exist");
+        assert_eq!(builtin_hourly, 3);
+
+        // 标记落库后不会重复迁移。
+        assert!(
+            database_meta_key_exists(&conn, BLOCKLIST_SOURCE_ID_KEY, "检查迁移标记").unwrap()
+        );
     }
 
     #[test]

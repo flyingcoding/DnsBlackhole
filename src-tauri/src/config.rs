@@ -1984,6 +1984,18 @@ fn sync_directory(dir: &Path) {
 
 /// 只拼接远程清单，不含自定义规则。编译缓存以这一段为单位，
 /// 自定义规则的改动才不会让数百万条清单规则的编译结果失效。
+/// 规则来源标记里清单 ID 的前缀。
+///
+/// 统计和查询日志都按这个标记关联清单。用 ID 而不是名称，改名才不会把历史
+/// 切成两段；内置来源（自定义规则、重绑定防护等）没有 ID，直接用原文。
+pub const FILTER_SOURCE_PREFIX: &str = "f:";
+
+/// 拼出清单的来源标记，例如 `f:custom-1758012345-123`。
+pub fn filter_source_tag(filter_id: &str) -> String {
+    format!("{FILTER_SOURCE_PREFIX}{filter_id}")
+}
+
+
 pub fn build_remote_rules(data_dir: &Path, config: &AppConfig) -> String {
     if !config.use_filters {
         return String::new();
@@ -1996,8 +2008,8 @@ pub fn build_remote_rules(data_dir: &Path, config: &AppConfig) -> String {
             continue;
         }
         if let Ok(Some(content)) = read_filter_cache(data_dir, &filter.id) {
-            let source =
-                serde_json::to_string(&filter.name).unwrap_or_else(|_| "\"未知清单\"".into());
+            let source = serde_json::to_string(&filter_source_tag(&filter.id))
+                .unwrap_or_else(|_| "\"未知清单\"".into());
             if !rules.is_empty() {
                 rules.push('\n');
             }

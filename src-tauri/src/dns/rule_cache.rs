@@ -290,7 +290,9 @@ fn remote_rules_fingerprint(data_dir: &Path, app_config: &AppConfig) -> u64 {
         if has_rules {
             fingerprint.write(b"\n");
         }
-        let source = serde_json::to_string(&filter.name).unwrap_or_else(|_| "\"未知清单\"".into());
+        // 与 build_remote_rules 保持一致：标记里放清单 ID，改名不再让指纹失效。
+        let source = serde_json::to_string(&config::filter_source_tag(&filter.id))
+            .unwrap_or_else(|_| "\"未知清单\"".into());
         fingerprint.write(b"! dnsblackhole-source:");
         fingerprint.write(source.as_bytes());
         fingerprint.write(b"\n");

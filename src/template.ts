@@ -53,16 +53,6 @@ export function renderAppTemplate(appIconUrl: string): string {
     </header>
 
     <main class="content">
-      <aside class="config-change-bar hidden" id="config_change_bar" aria-live="polite">
-        <div>
-          <strong>${t("有未保存的更改")}</strong>
-          <span id="config_change_modules"></span>
-        </div>
-        <div class="button-group">
-          <button id="discard_config_btn" type="button">${t("放弃更改")}</button>
-          <button class="primary" id="save_all_config_btn" type="button">${t("保存全部更改")}</button>
-        </div>
-      </aside>
       <section class="view active" data-view-panel="dashboard">
         <div class="dashboard-controls">
           <div>
@@ -398,6 +388,7 @@ export function renderAppTemplate(appIconUrl: string): string {
             <h2>${t("DNS 设置")}</h2>
             <div class="button-group">
               <span class="save-state-label" aria-live="polite">${t("正在读取配置")}</span>
+              <button class="discard-config-btn" type="button">${t("放弃更改")}</button>
               <button class="primary" id="save_btn" type="button">${t("保存全部更改")}</button>
               <button id="start_btn" type="button">${t("启动")}</button>
               <button id="stop_btn" type="button">${t("停止")}</button>
@@ -679,6 +670,7 @@ export function renderAppTemplate(appIconUrl: string): string {
             <h2>${t("安全防护")}</h2>
             <div class="button-group">
               <span class="save-state-label" aria-live="polite">${t("正在读取配置")}</span>
+              <button class="discard-config-btn" type="button">${t("放弃更改")}</button>
               <button class="primary" id="save_security_btn" type="button">${t("保存全部更改")}</button>
             </div>
           </div>
@@ -1041,6 +1033,7 @@ export function renderAppTemplate(appIconUrl: string): string {
             </div>
             <div class="button-group">
               <span class="save-state-label" aria-live="polite">${t("正在读取配置")}</span>
+              <button class="discard-config-btn" type="button">${t("放弃更改")}</button>
               <button class="primary" id="save_settings_btn" type="button">${t("保存全部更改")}</button>
             </div>
           </div>
@@ -1525,6 +1518,7 @@ export function renderAppTemplate(appIconUrl: string): string {
             <div class="button-group">
               <span class="filter-update-progress hidden" id="filter_update_progress" role="status"></span>
               <span class="save-state-label" aria-live="polite">${t("正在读取配置")}</span>
+              <button class="discard-config-btn" type="button">${t("放弃更改")}</button>
               <button id="save_filters_btn" type="button">${t("保存全部更改")}</button>
               <button id="add_filter_btn" type="button">${t("添加黑名单")}</button>
               <button class="hidden" id="cancel_filter_update_btn" type="button">${t("取消更新")}</button>
@@ -1533,6 +1527,7 @@ export function renderAppTemplate(appIconUrl: string): string {
           </div>
           <div class="filters-table" role="table" aria-label="${t("远程黑名单")}">
             <div class="filters-head" role="row">
+              <span role="columnheader"><span class="sr-only">${t("顺序")}</span></span>
               <span role="columnheader">${t("启用")}</span>
               <span role="columnheader">${t("名称")}</span>
               <span role="columnheader">${t("规则数")}</span>
@@ -1551,6 +1546,7 @@ export function renderAppTemplate(appIconUrl: string): string {
             <h2>${t("自定义过滤规则")}</h2>
             <div class="button-group">
               <span class="save-state-label" aria-live="polite">${t("正在读取配置")}</span>
+              <button class="discard-config-btn" type="button">${t("放弃更改")}</button>
               <button class="primary" id="save_custom_btn" type="button">${t("保存全部更改")}</button>
             </div>
           </div>

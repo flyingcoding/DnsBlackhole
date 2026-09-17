@@ -101,9 +101,11 @@ pub(crate) struct QueryLogRuleActionResult {
     pub(crate) message: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum FilterUpdateScope {
     ManualAll,
+    /// 手动更新列表里选定的清单，其余清单保持原样。
+    ManualOnly(Vec<String>),
     AutomaticDueAt(u64),
 }
 
@@ -674,9 +676,8 @@ pub(crate) fn filter_runtime_changed(previous: &AppConfig, next: &AppConfig) -> 
             .iter()
             .zip(&next.filters)
             .any(|(previous, next)| {
-                previous.id != next.id
-                    || previous.name != next.name
-                    || previous.enabled != next.enabled
+                // 规则来源标记里只有清单 ID，改名不改变规则内容，不必重建。
+                previous.id != next.id || previous.enabled != next.enabled
             })
         || previous.blacklist != next.blacklist
         || previous.blocking_mode != next.blocking_mode
@@ -1007,8 +1008,13 @@ fn append_config_line(raw: &mut String, line: &str) {
 pub(crate) fn update_filters_blocking(
     state: Arc<AppState>,
     config: AppConfig,
+    filter_ids: Option<Vec<String>>,
 ) -> Result<FilterUpdateResult, String> {
-    update_filters_blocking_with_scope(state, config, FilterUpdateScope::ManualAll)
+    let scope = match filter_ids {
+        Some(ids) => FilterUpdateScope::ManualOnly(ids),
+        None => FilterUpdateScope::ManualAll,
+    };
+    update_filters_blocking_with_scope(state, config, scope)
 }
 
 fn update_due_filters_blocking(
@@ -1032,24 +1038,31 @@ fn update_filters_blocking_with_scope(
     config.validate()?;
     // 手动更新沿用“提交当前编辑后更新”的语义，但提交必须发生在下载前。
     // 自动更新只从服务端取快照，绝不提交调用方的旧配置。
-    if matches!(scope, FilterUpdateScope::ManualAll) {
+    if !matches!(scope, FilterUpdateScope::AutomaticDueAt(_)) {
         save_config_blocking(Arc::clone(&state), config)?;
     }
     config = state.current_config()?;
     state.begin_filter_update();
     let _progress_guard = FilterUpdateProgressGuard(&state);
     let staging = FilterUpdateStaging::new(&state.data_dir)?;
-    let report = match scope {
+    let report = match &scope {
         FilterUpdateScope::ManualAll => filters::update_enabled_filters(
             &staging.0,
             &mut config,
             &state.filter_update_cancel,
             |progress| state.record_filter_update_progress(progress),
         )?,
+        FilterUpdateScope::ManualOnly(ids) => filters::update_selected_filters(
+            &staging.0,
+            &mut config,
+            ids,
+            &state.filter_update_cancel,
+            |progress| state.record_filter_update_progress(progress),
+        )?,
         FilterUpdateScope::AutomaticDueAt(now) => filters::update_due_filters(
             &staging.0,
             &mut config,
-            now,
+            *now,
             &state.filter_update_cancel,
             |progress| state.record_filter_update_progress(progress),
         )?,
@@ -1123,8 +1136,8 @@ fn update_filters_blocking_with_scope(
     }
 
     let status = match scope {
-        FilterUpdateScope::ManualAll => state.status(true),
         FilterUpdateScope::AutomaticDueAt(_) => state.status_with_log_stats(false, false),
+        _ => state.status(true),
     };
     Ok(FilterUpdateResult {
         status,

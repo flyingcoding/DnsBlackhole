@@ -894,6 +894,7 @@ mod desktop {
         app: tauri::AppHandle,
         state: tauri::State<'_, Arc<GuiState>>,
         config: AppConfig,
+        filter_ids: Option<Vec<String>>,
     ) -> Result<FilterUpdateResult, String> {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         let _ = state;
@@ -903,10 +904,10 @@ mod desktop {
             #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             let result = privileged_bridge::ServiceClient::call(
                 "update_filters",
-                &serde_json::json!({ "config": config }),
+                &serde_json::json!({ "config": config, "filter_ids": filter_ids }),
             )?;
             #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-            let result = update_filters_blocking(state.local()?, config)?;
+            let result = update_filters_blocking(state.local()?, config, filter_ids)?;
 
             let latest = {
                 #[cfg(any(target_os = "macos", target_os = "linux", windows))]

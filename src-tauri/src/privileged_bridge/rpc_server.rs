@@ -68,6 +68,14 @@ struct ConfigParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateFiltersParams {
+    config: AppConfig,
+    /// 为空表示更新全部启用的清单，兼容旧版调用方。
+    #[serde(default)]
+    filter_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 struct PauseProtectionParams {
     duration_seconds: u64,
 }
@@ -359,8 +367,12 @@ pub(crate) fn dispatch_request(
         "clear_statistics" => to_value(clear_statistics_blocking(state)?)?,
         "clear_security_events" => to_value(clear_security_events_blocking(state)?)?,
         "update_filters" => {
-            let params: ConfigParams = parse_params(params)?;
-            to_value(update_filters_blocking(Arc::clone(state), params.config)?)?
+            let params: UpdateFiltersParams = parse_params(params)?;
+            to_value(update_filters_blocking(
+                Arc::clone(state),
+                params.config,
+                params.filter_ids,
+            )?)?
         }
         "get_filter_update_progress" => to_value(state.filter_update_progress()?)?,
         "cancel_filter_update" => to_value(state.request_filter_update_cancel()?)?,

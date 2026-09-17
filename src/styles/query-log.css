@@ -368,7 +368,8 @@
 .query-log-head,
 .query-log-row {
   display: grid;
-  grid-template-columns: 130px minmax(280px, 1.35fr) minmax(210px, 0.95fr) 160px;
+  /* 请求列空得多，响应列要塞下“过滤器：<清单全名>”，所以权重给到响应。 */
+  grid-template-columns: 130px minmax(250px, 1fr) minmax(270px, 1.3fr) 160px;
   align-items: center;
 }
 
@@ -475,7 +476,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  line-height: 1.25;
+  /* 1.25 的行盒比字体实际需要的矮 1px，配合 overflow 会削掉 g/y 的下伸笔画。 */
+  line-height: 1.5;
 }
 
 .log-request {
@@ -502,6 +504,7 @@
 .log-request-content {
   flex: 1;
 }
+
 
 .log-request-meta {
   display: flex;
@@ -735,7 +738,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  line-height: 1.25;
+  /* 1.25 的行盒比字体实际需要的矮 1px，配合 overflow 会削掉 g/y 的下伸笔画。 */
+  line-height: 1.5;
   font-weight: 500;
 }
 
